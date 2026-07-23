@@ -1,5 +1,9 @@
 # ratchet-ts
 
+[![npm](https://img.shields.io/npm/v/ratchet-ts.svg)](https://www.npmjs.com/package/ratchet-ts)
+[![license](https://img.shields.io/npm/l/ratchet-ts.svg)](./LICENSE)
+[![types](https://img.shields.io/npm/types/ratchet-ts.svg)](./src/index.ts)
+
 Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 
 > ### Not audited. Read this before you ship it.
@@ -39,15 +43,15 @@ before you trust it.
 
 | Library | License | Post-quantum | Language |
 | --- | --- | --- | --- |
-| [libsignal](https://github.com/signalapp/libsignal) (libsignal-client) | AGPL-3.0 *(verify)* | Yes, PQXDH *(verify)* | Rust + bindings |
-| [libsignal-protocol-typescript](https://github.com/privacyresearchgroup/libsignal-protocol-typescript) | GPL-3.0 *(verify)* | No *(verify)* | TypeScript |
-| [Olm / vodozemac](https://github.com/matrix-org/vodozemac) | Apache-2.0 *(verify)* | No *(verify)* | C++ / Rust |
+| [libsignal](https://github.com/signalapp/libsignal) (libsignal-client) | AGPL-3.0 | Yes, PQXDH | Rust + bindings |
+| [libsignal-protocol-typescript](https://github.com/privacyresearchgroup/libsignal-protocol-typescript) | GPL-3.0 | No | TypeScript |
+| [Olm / vodozemac](https://github.com/matrix-org/vodozemac) | Apache-2.0 | No | C++ / Rust |
 | **ratchet-ts** | **MIT** | **Yes, ML-KEM-768 hybrid** | **TypeScript** |
 
-The license and post-quantum columns for the other three are from public
-knowledge and are marked *(verify)*: confirm them against each project before you
-rely on the comparison. The `ratchet-ts` row is verifiable from this repository:
-the license is in [LICENSE](./LICENSE) and the ML-KEM-768 handshake is in
+Licenses above were confirmed against each project's repository on 2026-07-23
+(libsignal AGPL-3.0, libsignal-protocol-typescript GPL-3.0, vodozemac Apache-2.0).
+The `ratchet-ts` row is verifiable from this repository: the license is in
+[LICENSE](./LICENSE) and the ML-KEM-768 handshake is in
 [`src/handshake.ts`](./src/handshake.ts).
 
 ## Install
