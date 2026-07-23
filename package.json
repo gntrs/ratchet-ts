@@ -17,11 +17,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gintaras/ratchet-ts.git"
+    "url": "git+https://github.com/gntrs/ratchet-ts.git"
   },
-  "homepage": "https://github.com/gintaras/ratchet-ts#readme",
+  "homepage": "https://github.com/gntrs/ratchet-ts#readme",
   "bugs": {
-    "url": "https://github.com/gintaras/ratchet-ts/issues"
+    "url": "https://github.com/gntrs/ratchet-ts/issues"
   },
   "sideEffects": false,
   "main": "./dist/index.cjs",
