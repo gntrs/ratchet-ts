@@ -6,52 +6,33 @@
 
 Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 
-> ### Not audited. Read this before you ship it.
->
-> This library has **not** had an independent security audit, and it has **not**
-> had formal verification. It is a careful, tested, readable implementation
-> written by one person, built on the well reviewed [`@noble`](https://github.com/paulmillr/noble-curves)
-> primitives, but the protocol composition on top of those primitives has only
-> been reviewed by its author and exercised by its own test suite.
->
-> What that means in practice:
->
-> - The cryptographic primitives (X25519, ML-KEM-768, HKDF-SHA256, HMAC-SHA256,
->   XChaCha20-Poly1305) come from audited libraries. The way this code wires them
->   into a handshake and a ratchet has not been reviewed by anyone else.
-> - There may be protocol-level or state-machine bugs that unit tests do not
->   catch. Absence of a failing test is not proof of correctness.
-> - If you are protecting people whose safety depends on this, that is exactly
->   the situation where an unaudited implementation is the wrong tool. Use
->   [libsignal](https://github.com/signalapp/libsignal) and accept its license,
->   or fund an audit of this one.
->
-> Good uses today: learning, prototyping, internal tools, projects where MIT
-> licensing is a hard requirement and you can accept the audit gap with eyes
-> open. Treat 0.x as pre-stability: the wire format and API can change.
+> **Not audited.** No independent audit, no formal verification. The primitives
+> (X25519, ML-KEM-768, HKDF-SHA256, HMAC-SHA256, XChaCha20-Poly1305) come from the
+> audited [`@noble`](https://github.com/paulmillr) libraries. The protocol on top
+> of them was written and reviewed by one person. There can be state-machine bugs
+> no test catches. If real people's safety depends on it, use
+> [libsignal](https://github.com/signalapp/libsignal) or fund an audit of this.
+> Fine for learning, prototyping, internal tools, and anywhere MIT is a hard
+> requirement and you can accept the gap. On 0.x the wire format and API can move.
 
-## Why this exists
+## Why
 
-If you want end-to-end encryption in JavaScript today, the practical options are
-narrow. `libsignal` is the reference, but it is AGPL/GPL, which is effectively
-unusable inside a closed-source product. The remaining path is to roll your own,
-which is how most E2EE goes wrong.
+`libsignal` is the reference, and it is AGPL/GPL, so you cannot use it inside a
+closed-source product. The usual next move is to write your own ratchet, which is
+how most E2EE breaks.
 
-`ratchet-ts` is a third option: an MIT-licensed, tested, readable Double Ratchet
-with a post-quantum hybrid handshake, small enough to actually read end to end
-before you trust it.
+This is the third option: MIT, post-quantum, and small enough to read before you
+trust it.
 
 | Library | License | Post-quantum | Language |
 | --- | --- | --- | --- |
-| [libsignal](https://github.com/signalapp/libsignal) (libsignal-client) | AGPL-3.0 | Yes, PQXDH | Rust + bindings |
+| [libsignal](https://github.com/signalapp/libsignal) | AGPL-3.0 | Yes, PQXDH | Rust + bindings |
 | [libsignal-protocol-typescript](https://github.com/privacyresearchgroup/libsignal-protocol-typescript) | GPL-3.0 | No | TypeScript |
 | [Olm / vodozemac](https://github.com/matrix-org/vodozemac) | Apache-2.0 | No | C++ / Rust |
 | **ratchet-ts** | **MIT** | **Yes, ML-KEM-768 hybrid** | **TypeScript** |
 
-Licenses above were confirmed against each project's repository on 2026-07-23
-(libsignal AGPL-3.0, libsignal-protocol-typescript GPL-3.0, vodozemac Apache-2.0).
-The `ratchet-ts` row is verifiable from this repository: the license is in
-[LICENSE](./LICENSE) and the ML-KEM-768 handshake is in
+Licenses confirmed against each repo on 2026-07-23. The `ratchet-ts` row is
+verifiable here: license in [LICENSE](./LICENSE), the ML-KEM-768 handshake in
 [`src/handshake.ts`](./src/handshake.ts).
 
 ## Install
@@ -60,13 +41,13 @@ The `ratchet-ts` row is verifiable from this repository: the license is in
 npm install ratchet-ts
 ```
 
-Runtime dependencies, all MIT: `@noble/curves`, `@noble/ciphers`, `@noble/hashes`,
+Runtime deps, all MIT: `@noble/curves`, `@noble/ciphers`, `@noble/hashes`,
 `@noble/post-quantum`.
 
 ## Quickstart
 
-This is the same code the package's smoke test runs against the published
-tarball, so it is proven to work end to end.
+This is the exact code the smoke test runs against the packed tarball, so it is
+proven end to end.
 
 ```ts
 import assert from 'node:assert/strict';
@@ -86,7 +67,7 @@ const aliceOpen = await engine.open(alice, bobOpen.reply, { pending });
 assert.equal(aliceOpen.outcome, 'accepted');
 let aliceSession = aliceOpen.session;
 
-// Both sides can show the same 6-word fingerprint to verify out of band.
+// Both sides show the same 6-word fingerprint to verify out of band.
 console.log('fingerprint:', formatFingerprint(bobOpen.peerFingerprint));
 
 // Alice -> Bob
@@ -103,66 +84,46 @@ const a2 = await engine.open(alice, b2.token, { session: aliceSession });
 assert.equal(a2.plaintext, 'hi back from bob');
 ```
 
-`seal` and `open` both return a fresh `session`. The ratchet is immutable at the
-API boundary: keep the returned session and drop the old one, and do not reuse a
-session object across two `seal` calls.
+`seal` and `open` each return a fresh `session`. The ratchet is immutable at the
+API boundary: keep the returned session, drop the old one, never reuse a session
+across two `seal` calls.
 
-## What you get
+Want to watch it work first? `node examples/demo.mjs` runs a full handshake, a
+message each way, and a tamper that fails closed.
 
-- **Forward secrecy.** Message keys are derived once, used once, and dropped.
-  Compromising the device now does not decrypt captured older messages.
-- **Post-compromise security.** After a key compromise, one DH ratchet step from
-  each side heals the session: the attacker's copied state stops working.
-- **Out-of-order delivery.** Messages that arrive late or reordered still
-  decrypt. Skipped message keys are parked, up to a bounded limit.
-- **Replay rejection.** A ciphertext that was already opened cannot be opened
-  again.
-- **Tamper fail-closed.** Any single bit flipped in the ciphertext, header,
-  nonce, or a truncation fails authentication and decrypts nothing.
-- **Hybrid post-quantum.** The handshake mixes an X25519 result and an
-  ML-KEM-768 result into the root key, so the session secret holds if **either**
-  of the two stands. A future quantum computer that breaks X25519 does not by
-  itself break a session, and a flaw in ML-KEM does not by itself break one.
+## What it does
+
+- **Forward secrecy.** Every message key is derived once, used once, dropped.
+  Stealing the device now does not decrypt old captured messages.
+- **Post-compromise security.** One ratchet step from each side after a compromise
+  locks the attacker's copied state out.
+- **Hybrid post-quantum.** The root key mixes an X25519 result and an ML-KEM-768
+  result. The session holds if either one holds. A quantum computer that breaks
+  X25519 does not break it, and a flaw in ML-KEM does not break it.
+- **Out-of-order and replay-safe.** Late or reordered messages still decrypt,
+  skipped keys parked up to a bound. A consumed ciphertext cannot be reopened.
+- **Tamper fail-closed.** One flipped bit in the ciphertext, header, or nonce
+  fails authentication and returns nothing. Headers are bound in as AAD.
 
 ## Protocol
 
-### Handshake
+**Handshake** (PQXDH-shaped). The initiator sends an `invite` with its identity
+(X25519 + ML-KEM-768 public keys). The responder makes an ephemeral ratchet key,
+encapsulates to the initiator's ML-KEM key, mixes two X25519 DH results plus the
+ML-KEM shared secret through HKDF-SHA256 into the root key, and replies with an
+`accept` (ML-KEM ciphertext + ratchet public key). The initiator decapsulates,
+derives the same root key, and takes one DH step. One and a half round trips,
+after which the Double Ratchet takes over.
 
-A PQXDH-shaped hybrid handshake establishes the first root key.
+**Double Ratchet.** A DH ratchet turns on every new peer ratchet key, deriving a
+new root key and chain. A symmetric ratchet runs each chain forward with
+HMAC-SHA256, one unique key per message, none walkable backward. Messages are
+sealed with XChaCha20-Poly1305, header bound in as AAD. Skipped keys are kept up
+to `MAX_SKIP = 1000` per chain; a larger gap is refused, not allocated.
 
-- The initiator sends an `invite` carrying its long-term identity (an X25519
-  public key and an ML-KEM-768 public key).
-- The responder generates an ephemeral ratchet key, encapsulates to the
-  initiator's ML-KEM key, and mixes two X25519 Diffie-Hellman results plus the
-  ML-KEM shared secret through HKDF-SHA256 into the root key. It replies with an
-  `accept` carrying the ML-KEM ciphertext and its ratchet public key.
-- The initiator decapsulates, derives the same root key, and takes one DH
-  ratchet step to open its send and receive chains.
-
-This is a one-and-a-half round-trip design. The initiator has no forward secrecy
-for the handshake secret until the first ratchet step, at which point the Double
-Ratchet takes over.
-
-### Double Ratchet
-
-- A **DH ratchet** turns whenever a new peer ratchet public key is seen, deriving
-  a new root key and a fresh chain.
-- A **symmetric-key ratchet** runs each chain forward with HMAC-SHA256, so each
-  message gets a unique key that cannot be walked backward.
-- Messages are sealed with **XChaCha20-Poly1305**, with the message header bound
-  in as additional authenticated data, so header fields cannot be swapped or
-  edited without failing authentication.
-- Skipped message keys are retained up to **`MAX_SKIP = 1000`** per chain. A gap
-  larger than that is refused rather than allowed to exhaust memory.
-
-### Wire format
-
-Every token is a single ASCII string: `OCX1.<kind>.<base64url>`, where `<kind>`
-is `invite`, `accept`, or `message`, and the payload is a compact binary body,
-not JSON, so it round-trips byte-exact for the AAD binding. Tokens are safe to
-paste into any text channel.
-
-### Message flow
+**Wire format.** Every token is one ASCII string: `OCX1.<kind>.<base64url>`,
+`<kind>` in `invite | accept | message`, payload a compact binary body (not JSON)
+so it round-trips byte-exact for the AAD binding. Safe to paste into any channel.
 
 <svg viewBox="0 0 640 300" width="100%" role="img" aria-label="Message flow: invite, accept, then ratcheting messages between Alice and Bob" xmlns="http://www.w3.org/2000/svg" style="max-width:640px;font-family:system-ui,-apple-system,sans-serif">
   <defs>
@@ -190,67 +151,46 @@ paste into any text channel.
   <text x="316" y="272" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">ratcheting both directions, one key per message</text>
 </svg>
 
-## Security properties and limitations
+## Limits
 
-The properties above are real, and the test suite exercises each of them. The
-limitations are just as real, and you should read them before trusting this in
-anything that matters.
+Read these before trusting it with anything real.
 
-- **No audit, no formal verification.** See the warning at the top. This is the
-  single most important limitation.
-- **Metadata is not hidden.** The protocol protects message contents and binds
-  headers, but it does nothing to hide who is talking to whom, when, or how much.
-  Wire tokens reveal length and kind. Anonymity and traffic analysis resistance
-  are out of scope.
-- **The ML-KEM contribution is not isolated by a test yet.** The hybrid handshake
-  mixes the ML-KEM shared secret into the root key, but there is currently no
-  test that asserts the ML-KEM half specifically alters the derived root key
-  independently of the X25519 half. This is a known gap: the hybrid mix is
-  present in code but its post-quantum contribution is not yet pinned down by a
-  regression test.
-- **Skip bound.** At most `MAX_SKIP = 1000` skipped keys are retained per chain.
-  Legitimate use inside that window is fine, larger gaps are refused. A peer that
-  deliberately jumps the message counter cannot force unbounded memory use, but
-  it can cause its own later messages to be undecryptable past the bound.
-- **Long-lived identity keys.** Identity keypairs are long-lived and are the root
-  of trust for fingerprint verification. This library generates them and uses
-  them, but it does not store them. Your application owns identity storage,
-  including secure-at-rest handling and any key rotation policy. Losing or
-  leaking an identity secret is a full compromise of that identity.
-- **Fingerprints depend on out-of-band comparison.** The 6-word fingerprint (66
-  bits) only protects against impersonation if two users actually compare it over
-  a channel the attacker does not control. If nobody checks it, there is no
-  authentication of the peer identity.
+- **No audit.** Repeated on purpose. It is the one that matters.
+- **Metadata is visible.** Contents are encrypted and headers are bound, but who
+  talks to whom, when, and how much is not hidden. Tokens leak length and kind.
+  No traffic-analysis resistance.
+- **The ML-KEM contribution is not pinned by a test.** The hybrid mix is in the
+  code, but no test yet asserts the ML-KEM half alone changes the root key. Known
+  gap.
+- **You own identity storage.** This library generates and uses identity keys, it
+  does not store them. At-rest handling and rotation are yours. Leaking an identity
+  secret is a full compromise of that identity.
+- **Fingerprints need out-of-band checking.** The 6-word (66-bit) fingerprint only
+  stops impersonation if two people compare it on a channel the attacker does not
+  control.
 
-## Test suite
+## Tests
 
-The suite is adversarial, not happy-path. It runs with `tsx --test` and every
-test asserts a specific failure reason where a failure is expected, so a wrong
-error is a failing test.
+Adversarial, not happy-path. Every expected failure asserts a specific reason, so
+a wrong error is a failing test.
 
-- **Forward secrecy snapshot test.** A clone of the session taken at message N is
-  shown to be unable to decrypt message N+5 after the live side ratchets forward.
-- **Post-compromise recovery.** After a simulated compromise, once the compromised
-  side re-ratchets, the copied old state stops decrypting.
-- **AAD bit-flip tamper matrix.** Single-bit flips across ciphertext, header
-  fields, nonce, and truncation each fail authentication, and malformed or
-  wrong-version tokens map to precise error reasons instead of throwing raw.
-- **Replay rejection.** An advanced session refuses to reopen a ciphertext it has
-  already consumed.
-- **Skip-limit DoS bound.** A message that would require skipping past `MAX_SKIP`
-  keys is refused with `skip_limit_exceeded` rather than allocating unboundedly.
+- **Forward secrecy.** A session snapshot at message N cannot decrypt N+5 once the
+  live side ratchets forward.
+- **Post-compromise.** Copied old state stops decrypting after the honest side
+  re-ratchets.
+- **Tamper matrix.** Single-bit flips across ciphertext, header, nonce, and
+  truncation all fail closed; malformed and wrong-version tokens map to precise
+  reasons instead of throwing raw.
+- **Replay.** A consumed ciphertext cannot be reopened.
+- **Skip bound.** Skipping past `MAX_SKIP = 1000` is refused with
+  `skip_limit_exceeded`, not allocated.
 
-Plus round-trip envelope encoding across all three token kinds and edge cases,
-deterministic fingerprinting, out-of-order delivery across ratchet turns, and
-session isolation and identity-mismatch handling.
-
-Run them:
+Plus envelope round-trips across all three token kinds, deterministic
+fingerprints, out-of-order delivery across ratchet turns, and identity-mismatch
+handling. 20 tests.
 
 ```sh
-npm install
-npm test
-npm run typecheck
-npm run build
+npm install && npm test && npm run typecheck && npm run build
 ```
 
 ## License
