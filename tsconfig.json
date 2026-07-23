@@ -1,0 +1,41 @@
+{
+  // nodenext, not bundler, because every import in src/ already writes the
+  // ".js" extension on a ".ts" file. That is the Node ESM convention and it is
+  // what lets tsx run these files untranspiled, so the config follows the
+  // source rather than the source being rewritten to suit the config.
+  "compilerOptions": {
+    "target": "ES2022",
+    // DOM is here for TextEncoder/TextDecoder/Uint8Array-adjacent globals only.
+    // src/ touches no Node builtins on purpose: this core has to run unchanged
+    // in the browser, where all of the encryption actually happens.
+    "lib": ["ES2022", "DOM"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "moduleDetection": "force",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    // The ratchet indexes into Uint8Array and into the skipped-key record in
+    // several places. Without this the compiler hands back a non-optional
+    // element type and the "!" assertions in bytes.ts would be silently
+    // meaningless.
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    // No "types" entry: @types/node is deliberately not a dependency of this
+    // package, so the handful of Node test-runner symbols the suite needs are
+    // declared locally in test/node-builtins.d.ts instead.
+    "types": [],
+
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
