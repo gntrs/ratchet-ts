@@ -1,8 +1,10 @@
 # ratchet-ts
 
+[![ci](https://github.com/gntrs/ratchet-ts/actions/workflows/ci.yml/badge.svg)](https://github.com/gntrs/ratchet-ts/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/ratchet-ts.svg)](https://www.npmjs.com/package/ratchet-ts)
 [![license](https://img.shields.io/npm/l/ratchet-ts.svg)](./LICENSE)
 [![types](https://img.shields.io/npm/types/ratchet-ts.svg)](./src/index.ts)
+[![npm downloads](https://img.shields.io/npm/dm/ratchet-ts.svg)](https://www.npmjs.com/package/ratchet-ts)
 
 Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 
