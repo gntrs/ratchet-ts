@@ -195,6 +195,27 @@ handling. 20 tests.
 npm install && npm test && npm run typecheck && npm run build
 ```
 
+## Benchmark
+
+Baseline numbers, single thread, no tuning. Run it yourself:
+
+```sh
+npm run bench
+```
+
+Measured on an AMD Ryzen 5 7530U, Node 25, `win32/x64`. Your hardware will differ; the point is the shape, not the absolute values.
+
+| Operation | Median | p95 | Throughput |
+|---|---|---|---|
+| `createIdentity` (X25519 + ML-KEM-768 keypairs) | 2.12 ms | 3.08 ms | ~464 / sec |
+| Full handshake (invite + accept + open) | 13.8 ms | 16.6 ms | ~73 / sec |
+| `seal` (256 B message) | 0.06 ms | 0.12 ms | ~13,600 / sec |
+| `open` (256 B message) | 0.065 ms | 0.12 ms | ~12,500 / sec |
+
+Ciphertext overhead is a constant **+259 bytes per message** (ratchet header + AEAD tag + wire framing), independent of payload size.
+
+The handshake is the expensive step because it runs an ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges; it happens once per conversation. Steady-state messaging is a symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal`/`open` are sub-0.1 ms. These are honest baselines, not a tuned record. Later versions will publish a fixed-iteration bench in CI so numbers move only when the code does.
+
 ## License
 
 MIT. Copyright (c) 2026 Gintaras. See [LICENSE](./LICENSE).
