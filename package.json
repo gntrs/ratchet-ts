@@ -49,7 +49,9 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "prebench": "tsup",
+    "bench": "node bench/bench.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "2.2.0",
