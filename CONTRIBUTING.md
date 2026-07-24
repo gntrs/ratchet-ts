@@ -24,8 +24,7 @@ npm run build       # tsup -> ESM + CJS + d.ts
 node examples/demo.mjs
 ```
 
-All four must be green before you open a PR. CI runs the same on Node 18, 20,
-and 22.
+All four must pass before you open a PR. CI runs the same on Node 20, 22, and 24.
 
 ## Reporting a vulnerability
 
