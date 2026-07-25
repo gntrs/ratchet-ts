@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="324" viewBox="0 0 760 324" role="img" aria-label="Full handshake (invite + accept + open), median milliseconds per machine, lower is better">
-  <rect width="760" height="324" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="370" viewBox="0 0 760 370" role="img" aria-label="Full handshake (invite + accept + open), median milliseconds per machine, lower is better">
+  <rect width="760" height="370" fill="#ffffff"/>
   <text x="16" y="28" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#1f2328">Full handshake (invite + accept + open)</text>
   <text x="16" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#59636e">median ms · lower is better · single thread, no tuning</text>
-  <line x1="256" y1="70" x2="256" y2="312" stroke="#d1d9e0" stroke-width="1"/>
+  <line x1="256" y1="70" x2="256" y2="358" stroke="#d1d9e0" stroke-width="1"/>
 
   <text x="244" y="87" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Core i5-12500H</text>
   <text x="244" y="103" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">laptop 2022, Windows · Node 24</text>
@@ -14,18 +14,23 @@
   <rect x="256" y="124" width="222" height="20" rx="3" fill="#2563eb"/>
   <text x="486" y="138" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">7.3 ms</text>
 
-  <text x="244" y="179" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Core i5-10400F</text>
-  <text x="244" y="195" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">desktop 2020, WSL · Node 22</text>
-  <rect x="256" y="170" width="332" height="20" rx="3" fill="#2563eb"/>
-  <text x="596" y="184" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">10.9 ms</text>
+  <text x="244" y="179" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">EPYC 9354P 32-core</text>
+  <text x="244" y="195" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">VPS, Linux · Node 22</text>
+  <rect x="256" y="170" width="271" height="20" rx="3" fill="#2563eb"/>
+  <text x="535" y="184" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">8.9 ms</text>
 
   <text x="244" y="225" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Core i5-10400F</text>
-  <text x="244" y="241" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">same box, Windows · Node 24</text>
-  <rect x="256" y="216" width="350" height="20" rx="3" fill="#2563eb"/>
-  <text x="614" y="230" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">11.5 ms</text>
+  <text x="244" y="241" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">desktop 2020, WSL · Node 22</text>
+  <rect x="256" y="216" width="332" height="20" rx="3" fill="#2563eb"/>
+  <text x="596" y="230" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">10.9 ms</text>
 
-  <text x="244" y="271" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Ryzen 5 7530U</text>
-  <text x="244" y="287" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">laptop, Windows · Node 25</text>
-  <rect x="256" y="262" width="420" height="20" rx="3" fill="#2563eb"/>
-  <text x="684" y="276" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">13.8 ms</text>
+  <text x="244" y="271" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Core i5-10400F</text>
+  <text x="244" y="287" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">same box, Windows · Node 24</text>
+  <rect x="256" y="262" width="350" height="20" rx="3" fill="#2563eb"/>
+  <text x="614" y="276" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">11.5 ms</text>
+
+  <text x="244" y="317" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">Ryzen 5 7530U</text>
+  <text x="244" y="333" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">laptop, Windows · Node 25</text>
+  <rect x="256" y="308" width="420" height="20" rx="3" fill="#2563eb"/>
+  <text x="684" y="322" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">13.8 ms</text>
 </svg>
