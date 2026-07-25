@@ -1,7 +1,21 @@
-// Micro-benchmark for ratchet-ts. Baseline numbers, single thread, no tuning.
-// Run:  npm run build && node bench/bench.mjs
+// Micro-benchmark for ratchet-ts. Single thread, no tuning.
+//
+//   npm run bench                 3 runs, the default
+//   npm run bench -- --runs 5     5 runs
+//
+// One run is already a median over hundreds of operations. Repeating the whole
+// run catches the slower thing: a machine that is quiet for two seconds and busy
+// for the next two. The spread column is that noise made visible.
 import os from 'node:os';
 import { engine } from '../dist/index.js';
+
+const RUNS = (() => {
+  const i = process.argv.indexOf('--runs');
+  const n = i === -1 ? 3 : Number.parseInt(process.argv[i + 1] ?? '', 10);
+  return Number.isFinite(n) && n >= 1 && n <= 50 ? n : 3;
+})();
+
+const OPS = ['keygen', 'handshake', 'seal (256 B)', 'open (256 B)'];
 
 const stats = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -19,7 +33,8 @@ async function timed(n, fn) {
   return stats(ms);
 }
 
-// warm up the JIT and the noble tables
+// Warm up the JIT and the noble precomputed tables once. Timing a cold engine
+// measures the compiler, not the cryptography.
 for (let i = 0; i < 20; i++) {
   const a = await engine.createIdentity();
   const b = await engine.createIdentity();
@@ -28,57 +43,103 @@ for (let i = 0; i < 20; i++) {
   await engine.open(a, bo.reply, { pending: inv.pending });
 }
 
-const rows = [];
-const push = (op, st) =>
-  rows.push({
-    op,
-    'median ms': st.median.toFixed(3),
-    'mean ms': st.mean.toFixed(3),
-    'p95 ms': st.p95.toFixed(3),
-    'ops/sec': Math.round(1000 / st.mean).toLocaleString('en-US'),
+async function oneRun() {
+  const out = {};
+
+  // 1. identity keygen: X25519 + ML-KEM-768 keypairs
+  out['keygen'] = await timed(300, () => engine.createIdentity());
+
+  // 2. full handshake: invite + accept + open, ML-KEM encaps + decaps + 2x X25519.
+  // Identities are built outside the timer so keygen is not counted twice.
+  const pairs = [];
+  for (let i = 0; i < 300; i++) {
+    pairs.push([await engine.createIdentity(), await engine.createIdentity()]);
+  }
+  let hi = 0;
+  out['handshake'] = await timed(300, async () => {
+    const [a, b] = pairs[hi++];
+    const inv = await engine.invite(a);
+    const bo = await engine.open(b, inv.token, {});
+    await engine.open(a, bo.reply, { pending: inv.pending });
   });
 
-// 1. identity keygen: X25519 + ML-KEM-768 keypairs
-push('keygen', await timed(300, () => engine.createIdentity()));
-
-// 2. full handshake: invite + accept + open, ML-KEM encaps + decaps + 2x X25519
-const pairs = [];
-for (let i = 0; i < 300; i++) pairs.push([await engine.createIdentity(), await engine.createIdentity()]);
-let hi = 0;
-push('handshake', await timed(300, async () => {
-  const [a, b] = pairs[hi++];
+  // 3 + 4. seal and open on one live session, 256-byte payload, real ratchet advance
+  const a = await engine.createIdentity();
+  const b = await engine.createIdentity();
   const inv = await engine.invite(a);
   const bo = await engine.open(b, inv.token, {});
-  await engine.open(a, bo.reply, { pending: inv.pending });
-}));
-
-// 3 + 4. seal / open on a live session, 256-byte payload, real ratchet advance
-const a = await engine.createIdentity();
-const b = await engine.createIdentity();
-const inv = await engine.invite(a);
-const bo = await engine.open(b, inv.token, {});
-let aliceSession = (await engine.open(a, bo.reply, { pending: inv.pending })).session;
-let bobSession = bo.session;
-const msg = 'x'.repeat(256);
-const N = 2000;
-const sealMs = [], openMs = [];
-let overhead = 0;
-for (let i = 0; i < N; i++) {
-  const t0 = performance.now();
-  const sealed = await engine.seal(aliceSession, msg);
-  const t1 = performance.now();
-  const opened = await engine.open(b, sealed.token, { session: bobSession });
-  const t2 = performance.now();
-  sealMs.push(t1 - t0);
-  openMs.push(t2 - t1);
-  aliceSession = sealed.session;
-  bobSession = opened.session;
-  if (i === 0) overhead = Buffer.byteLength(sealed.token, 'utf8') - Buffer.byteLength(msg, 'utf8');
+  let aliceSession = (await engine.open(a, bo.reply, { pending: inv.pending })).session;
+  let bobSession = bo.session;
+  const msg = 'x'.repeat(256);
+  const sealMs = [];
+  const openMs = [];
+  let overhead = 0;
+  for (let i = 0; i < 2000; i++) {
+    const t0 = performance.now();
+    const sealed = await engine.seal(aliceSession, msg);
+    const t1 = performance.now();
+    const opened = await engine.open(b, sealed.token, { session: bobSession });
+    const t2 = performance.now();
+    sealMs.push(t1 - t0);
+    openMs.push(t2 - t1);
+    aliceSession = sealed.session;
+    bobSession = opened.session;
+    if (i === 0) {
+      overhead = Buffer.byteLength(sealed.token, 'utf8') - Buffer.byteLength(msg, 'utf8');
+    }
+  }
+  out['seal (256 B)'] = stats(sealMs);
+  out['open (256 B)'] = stats(openMs);
+  out.overhead = overhead;
+  return out;
 }
-push('seal (256 B)', stats(sealMs));
-push('open (256 B)', stats(openMs));
 
 console.log(`\nratchet-ts benchmark`);
-console.log(`${process.version}  |  ${(os.cpus()[0] || {}).model}  |  ${os.platform()}/${os.arch()}\n`);
-console.table(rows);
-console.log(`ciphertext overhead: +${overhead} bytes per message (constant)\n`);
+console.log(`${process.version}  |  ${(os.cpus()[0] || {}).model}  |  ${os.platform()}/${os.arch()}`);
+console.log(`${RUNS} run${RUNS === 1 ? '' : 's'}\n`);
+
+const runs = [];
+for (let r = 1; r <= RUNS; r++) {
+  process.stdout.write(`  running ${r}/${RUNS}\r`);
+  runs.push(await oneRun());
+}
+process.stdout.write('                    \r');
+
+if (RUNS > 1) {
+  console.log('each run, median ms');
+  console.table(
+    runs.map((run, i) => {
+      const row = { run: i + 1 };
+      for (const op of OPS) row[op] = run[op].median.toFixed(3);
+      return row;
+    }),
+  );
+  console.log(`across ${RUNS} runs`);
+}
+
+// The headline number is the median of the per-run medians. Best and worst are the
+// fastest and slowest run. Spread is how far apart those two are, as a share of the
+// headline: under 10 percent the machine was quiet, over 25 percent something else
+// was competing for the CPU and the numbers are worth less.
+console.table(
+  OPS.map((op) => {
+    const medians = runs.map((r) => r[op].median).sort((a, b) => a - b);
+    const means = runs.map((r) => r[op].mean);
+    const p95s = runs.map((r) => r[op].p95);
+    const median = medians[Math.floor(medians.length / 2)];
+    const best = medians[0];
+    const worst = medians[medians.length - 1];
+    const meanOfMeans = means.reduce((a, b) => a + b, 0) / means.length;
+    return {
+      op,
+      'median ms': median.toFixed(3),
+      'best ms': best.toFixed(3),
+      'worst ms': worst.toFixed(3),
+      spread: `${(((worst - best) / median) * 100).toFixed(1)}%`,
+      'p95 ms': Math.max(...p95s).toFixed(3),
+      'ops/sec': Math.round(1000 / meanOfMeans).toLocaleString('en-US'),
+    };
+  }),
+);
+
+console.log(`ciphertext overhead: +${runs[0].overhead} bytes per message (constant)\n`);
