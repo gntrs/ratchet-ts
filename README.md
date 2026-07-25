@@ -205,12 +205,12 @@ Single thread, no tuning. Same bench on four machines so far, medians:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: i5-12500H 6.5, Ryzen 7 5800X3D 7.3, i5-10400F 10.9, Ryzen 5 7530U 13.8. Lower is better." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: i5-12500H 6.5, Ryzen 7 5800X3D 7.3, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5, Ryzen 5 7530U 13.8. Lower is better." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: i5-12500H 0.025, Ryzen 7 5800X3D 0.028, i5-10400F 0.053, Ryzen 5 7530U 0.061. Lower is better." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: i5-12500H 0.025, Ryzen 7 5800X3D 0.028, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042, Ryzen 5 7530U 0.061. Lower is better." width="760">
 </picture>
 
 | Machine | Node | Handshake | `seal` 256 B | `open` 256 B |
@@ -218,11 +218,12 @@ Single thread, no tuning. Same bench on four machines so far, medians:
 | Core i5-12500H (laptop 2022) | 24 | 6.5 ms | 0.025 ms | 0.026 ms |
 | Ryzen 7 5800X3D (desktop) | 24 | 7.3 ms | 0.028 ms | 0.031 ms |
 | Core i5-10400F (desktop 2020, WSL) | 22 | 10.9 ms | 0.053 ms | 0.057 ms |
+| Core i5-10400F (same box, Windows) | 24 | 11.5 ms | 0.042 ms | 0.044 ms |
 | Ryzen 5 7530U (laptop) | 25 | 13.8 ms | 0.061 ms | 0.065 ms |
 
 The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Ciphertext overhead is a constant **+259 bytes per message** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware.
 
-The bench is single-core bound, so a newer core beats a bigger machine: the 2022 laptop chip outruns the 5800X3D desktop. The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs); a fixed-iteration CI bench is planned so numbers only move when the code does.
+The bench is single-core bound, so a newer core beats a bigger machine: the 2022 laptop chip outruns the 5800X3D desktop. The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. Treat that as the noise floor between runtimes, not a verdict on either. The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs); a fixed-iteration CI bench is planned so numbers only move when the code does.
 
 ## License
 

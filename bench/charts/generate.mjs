@@ -8,10 +8,11 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 const MACHINES = [
-  { label: 'Core i5-12500H', sub: 'laptop 2022 · Node 24', handshake: 6.5, seal: 0.025 },
-  { label: 'Ryzen 7 5800X3D', sub: 'desktop · Node 24', handshake: 7.3, seal: 0.028 },
+  { label: 'Core i5-12500H', sub: 'laptop 2022, Windows · Node 24', handshake: 6.5, seal: 0.025 },
+  { label: 'Ryzen 7 5800X3D', sub: 'desktop, Windows · Node 24', handshake: 7.3, seal: 0.028 },
   { label: 'Core i5-10400F', sub: 'desktop 2020, WSL · Node 22', handshake: 10.9, seal: 0.053 },
-  { label: 'Ryzen 5 7530U', sub: 'laptop · Node 25', handshake: 13.8, seal: 0.061 },
+  { label: 'Core i5-10400F', sub: 'same box, Windows · Node 24', handshake: 11.5, seal: 0.042 },
+  { label: 'Ryzen 5 7530U', sub: 'laptop, Windows · Node 25', handshake: 13.8, seal: 0.061 },
 ];
 
 const THEMES = {
