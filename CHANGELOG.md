@@ -5,6 +5,49 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-07
+
+### Added
+
+- A `ratchet` command, shipped with the package. `ratchet recv` listens and
+  prints the exact command to run on the other machine; `ratchet send FILE
+  --to HOST` streams the file as sealed chunks over a direct TCP connection.
+  `--text` sends a message instead, and `-` reads stdin. The filename, size
+  and hash travel inside the encryption alongside the payload, so an observer
+  sees a byte count and nothing else. There is no relay, no server and no
+  account: the two machines talk straight to each other.
+- Both ends print six safety words the moment the handshake settles, before
+  the transfer finishes, so a person can compare them out of band while the
+  bytes are still moving. The words are a fingerprint of the two identities
+  hashed in a canonical order, so they are identical on both screens and one
+  party can simply read them aloud. They bind the identity pair, not the
+  session, which is the same property a Signal safety number has.
+- Identities persist under `RATCHET_HOME` (default `~/.ratchet`), written
+  0600 in a 0700 directory, so the same two machines keep the same words
+  across runs. `ratchet id` shows them, `ratchet id --reset` starts over.
+- `--stats` prints the measurement table (handshake, crypto time, wall time,
+  wire overhead, throughput, SHA-256 of the plaintext), `--json` emits it for
+  scripts with human output moved to stderr.
+
+### Fixed
+
+- Frame reassembly: chunks at the default 65519 byte size straddle TCP `data`
+  events, and the reassembler dropped the boundary, corrupting every chunk at
+  that size. Verified by moving real files and comparing hashes on both ends.
+- `.gitattributes` pins source files to LF. `bin/ratchet.mjs` opens with a
+  shebang, and a clone on a machine with `core.autocrlf=true` rewrote it to
+  `env node\r`, which fails only on Linux, which is exactly where the CLI is
+  most likely to run. Releases are packed from a fresh clone, so this would
+  have shipped broken to the platform it was written for.
+
+### Known limits
+
+- The wire format is base64 text, so a transfer costs about 33% more bytes
+  than the plaintext. That is the encoding, not the crypto: the per message
+  cryptographic overhead is still the constant 259 bytes documented above.
+- Both machines need a route to each other, in practice the same LAN or a
+  tunnel. There is no NAT traversal and no discovery.
+
 ## [0.2.0] - 2026-08-06
 
 ### Added
