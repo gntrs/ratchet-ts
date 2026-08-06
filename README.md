@@ -92,6 +92,22 @@ across two `seal` calls.
 
 Binary payloads go through `engine.sealBytes` and `engine.openBytes`: same
 sessions, same wire format, `Uint8Array` in and out (files, images, protobuf).
+
+```ts
+// A PNG header, deliberately not valid UTF-8.
+const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0xc0]);
+
+const sent = await engine.sealBytes(aliceSession, bytes);
+aliceSession = sent.session;
+
+// Note the shape: openBytes takes the session directly, not an identity plus
+// options. It only ever handles message tokens, so there is no handshake to
+// dispatch on, unlike `open`.
+const got = await engine.openBytes(bobSession, sent.token);
+assert.deepEqual(got.plaintext, bytes);
+bobSession = got.session;
+```
+
 Tokens interoperate across both APIs, because the string path is a UTF-8 view
 over the byte path: a `seal` token opens under `openBytes` as its exact UTF-8
 encoding, and a `sealBytes` token that happens to be valid UTF-8 opens under
