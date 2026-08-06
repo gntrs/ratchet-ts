@@ -46,6 +46,43 @@ npm install ratchet-ts
 Runtime deps, all MIT: `@noble/curves`, `@noble/ciphers`, `@noble/hashes`,
 `@noble/post-quantum`.
 
+## Send a file between two machines
+
+The package ships a `ratchet` command. Two machines on the same network, three
+commands, no account and no setup.
+
+On the machine receiving the file:
+
+```sh
+npx ratchet recv
+```
+
+It prints its LAN addresses and the exact command to run on the other machine.
+On the machine sending the file:
+
+```sh
+npx ratchet send holiday.jpg --to 192.168.1.24
+```
+
+Text works the same way, and a dash reads stdin so a pipe works:
+
+```sh
+echo "the wifi password is hunter2" | npx ratchet send - --to 192.168.1.24
+```
+
+The file contents and the metadata around them (the filename, the size, the
+hash) are all encrypted with the same ratchet the library exposes. It is a
+direct TCP connection between the two machines: no relay, no server, no account,
+nothing of yours in the middle.
+
+Both ends print six safety words the moment the handshake lands, before the
+bytes finish moving. **Compare them out of band**, out loud or over a channel an
+attacker on this network does not control. Matching words mean you are talking
+to the machine you think you are. Nobody checks this for you.
+
+Add `--stats` for the full measurement table, `--json` to pipe the numbers into
+something else, and `ratchet id` to see this machine's own words.
+
 ## Quickstart
 
 This is the exact code the smoke test runs against the packed tarball, so it is
