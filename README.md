@@ -90,8 +90,68 @@ assert.equal(a2.plaintext, 'hi back from bob');
 API boundary: keep the returned session, drop the old one, never reuse a session
 across two `seal` calls.
 
+Binary payloads go through `engine.sealBytes` and `engine.openBytes`: same
+sessions, same wire format, `Uint8Array` in and out (files, images, protobuf).
+Tokens interoperate across both APIs, because the string path is a UTF-8 view
+over the byte path: a `seal` token opens under `openBytes` as its exact UTF-8
+encoding, and a `sealBytes` token that happens to be valid UTF-8 opens under
+`open`. One token carries at most 65519 bytes of plaintext; chunk anything
+bigger yourself.
+
 Want to watch it work first? `node examples/demo.mjs` runs a full handshake, a
 message each way, and a tamper that fails closed.
+
+## Persist and restore
+
+Session state has to outlive the process or the conversation dies with it.
+Every save function returns one ASCII string in the same `OCX1.` family as the
+wire tokens, safe for a DB column or a file.
+
+```ts
+import assert from 'node:assert/strict';
+import {
+  engine,
+  serializeSession, deserializeSession,
+  serializePending, deserializePending,
+  exportIdentity, importIdentity,
+} from 'ratchet-ts';
+
+// A live conversation to save. In your app this comes from your own handshake.
+const identity = await engine.createIdentity();
+const peer = await engine.createIdentity();
+const invited = await engine.invite(identity);
+const peerOpen = await engine.open(peer, invited.token, {});
+const accepted = await engine.open(identity, peerOpen.reply, { pending: invited.pending });
+const session = accepted.session;
+
+// Save. Each call returns one ASCII string, safe for a DB column or a file.
+// WARNING: these strings contain private keys. Encrypt them at rest.
+const savedIdentity = exportIdentity(identity);          // "OCX1.identity...."
+const savedSession = serializeSession(session);          // "OCX1.session...."
+const savedPending = serializePending(invited.pending);  // "OCX1.pending...."
+
+// Restore after a restart, then carry on exactly where you left off.
+const identity2 = importIdentity(savedIdentity);
+const session2 = deserializeSession(savedSession);
+const pending2 = deserializePending(savedPending);
+
+const sealed = await engine.seal(session2, 'sent after the restart');
+const opened = await engine.open(peer, sealed.token, { session: peerOpen.session });
+assert.equal(opened.plaintext, 'sent after the restart');
+
+// Persist the LATEST state after every seal/open, overwriting the previous
+// snapshot. Treat a saved session as a HANDOFF, not a backup: once you restore
+// it, the old session object is dead. Sealing from both is the sharp edge, and
+// it is the first entry under Limits.
+```
+
+Three honest caveats. The strings contain private keys, so at-rest encryption is
+on you. The embedded 8-byte checksum is corruption detection, not
+authentication: anyone who can edit your stored state can forge a blob that
+loads, so never treat a restored session as proof of anything. Malformed or
+future-version state fails closed with a precise reason (`malformed_token`,
+`unknown_version`), never a raw throw. And restoring a snapshot rewinds the
+ratchet, which has consequences worth reading before you build on this.
 
 ## What it does
 
@@ -127,6 +187,17 @@ to `MAX_SKIP = 1000` per chain; a larger gap is refused, not allocated.
 `<kind>` in `invite | accept | message`, payload a compact binary body (not JSON)
 so it round-trips byte-exact for the AAD binding. Safe to paste into any channel.
 
+**Where the post-quantum protection actually is.** The ML-KEM-768 contribution
+is in the HANDSHAKE. It is mixed into the root key once, when the conversation
+opens, and it is what makes recorded traffic safe from harvest-now-decrypt-later.
+Every DH ratchet step after that is X25519 and nothing else, so the ongoing
+ratchet is classical: an adversary with a quantum computer who breaks X25519
+can follow the ratchet forward from a compromise, even though they still cannot
+recover the original root key. That is the same scope as Signal's PQXDH, and it
+is deliberately narrower than Signal's SPQR, which makes the ratchet itself
+post-quantum. This is a post-quantum handshake with a classical ratchet, not a
+post-quantum ratchet, and it should not be described as one.
+
 <svg viewBox="0 0 640 300" width="100%" role="img" aria-label="Message flow: invite, accept, then ratcheting messages between Alice and Bob" xmlns="http://www.w3.org/2000/svg" style="max-width:640px;font-family:system-ui,-apple-system,sans-serif">
   <defs>
     <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -153,20 +224,59 @@ so it round-trips byte-exact for the AAD binding. Safe to paste into any channel
   <text x="316" y="272" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">ratcheting both directions, one key per message</text>
 </svg>
 
+## Runs on
+
+No Node APIs in the core, only WebCrypto and the noble libraries, so the same
+build runs everywhere:
+
+- Node 20+: `node examples/runtime-smoke.mjs`
+- Bun: `bun examples/runtime-smoke.mjs`
+- Deno 2: `deno run --allow-read examples/runtime-smoke.mjs`
+- Browsers: serve the repo root (`npx serve`) and open `/examples/browser.html`
+- Cloudflare Workers: expected to work for the same reason, not yet CI-tested
+
+Run `npm ci && npm run build` first: the smoke test exercises `dist/index.js`,
+the exact artifact npm installs. CI proves Node, Bun and Deno on every push.
+
 ## Limits
 
 Read these before trusting it with anything real.
 
 - **No audit.** Repeated on purpose. It is the one that matters.
+- **Never seal from a stale session snapshot. This is the sharpest edge here.**
+  `deserializeSession` rewinds a conversation, it does not clone one. If you save
+  a session, keep sealing on the original, and later restore the saved string and
+  seal from that, both branches hold the same send chain key at the same message
+  number. The chain is a deterministic KDF, so the restored branch derives the
+  identical message key and stamps the identical message number onto a different
+  plaintext. **Nothing throws.** It is indistinguishable from a normal seal.
+  What we measured, so you do not have to guess:
+  - It is *not* a two-time pad. Each seal draws a fresh random 24-byte nonce, so
+    the two ciphertexts share no keystream and XOR reveals nothing. The AEAD
+    carries many messages under one key safely as long as the nonces differ.
+  - It *does* break forward secrecy across the rewound span. A chain key derives
+    every message key ahead of it until the next DH ratchet step, so an old
+    snapshot reads everything sealed after it in that chain. The ratchet deleted
+    those keys, the snapshot reconstructs them.
+  - It *does* silently lose a message. The receiver keeps whichever colliding
+    message number arrives first and rejects the other with `replay_detected`,
+    since a repeated number is exactly what a replay looks like. The losing
+    plaintext is unreadable forever and the sender is never told.
+
+  The rule: one live copy, always. A serialised session is a handoff. Save it,
+  drop the object it came from, and let the restored one be the only writer. The
+  library cannot detect a violation for you, so this is your invariant to hold.
 - **Metadata is visible.** Contents are encrypted and headers are bound, but who
   talks to whom, when, and how much is not hidden. Tokens leak length and kind.
   No traffic-analysis resistance.
-- **The ML-KEM contribution is not pinned by a test.** The hybrid mix is in the
-  code, but no test yet asserts the ML-KEM half alone changes the root key. Known
-  gap.
-- **You own identity storage.** This library generates and uses identity keys, it
-  does not store them. At-rest handling and rotation are yours. Leaking an identity
-  secret is a full compromise of that identity.
+- **One token carries at most 65519 bytes of plaintext.** The envelope length
+  prefix is u16, so an oversized `seal` or `sealBytes` input surfaces as a
+  `RangeError` from the encoder, not a `CryptoFailure`. Chunk large payloads
+  above the engine.
+- **You own identity storage.** This library generates, uses, and serialises
+  identity keys, it does not store them. At-rest handling (including encrypting
+  anything `exportIdentity` or `serializeSession` returns) and rotation are
+  yours. Leaking an identity secret is a full compromise of that identity.
 - **Fingerprints need out-of-band checking.** The 6-word (66-bit) fingerprint only
   stops impersonation if two people compare it on a channel the attacker does not
   control.
@@ -186,10 +296,39 @@ a wrong error is a failing test.
 - **Replay.** A consumed ciphertext cannot be reopened.
 - **Skip bound.** Skipping past `MAX_SKIP = 1000` is refused with
   `skip_limit_exceeded`, not allocated.
+- **Hybrid pin.** The hybrid claim is pinned, not just asserted.
+  `test/hybrid.test.ts` proves each half of the handshake moves the root key on
+  its own: two different ML-KEM shared secrets under identical X25519 inputs
+  yield different roots, and vice versa, and the hybrid root matches neither
+  half alone. It then runs the real invite/accept/complete exchange,
+  reconstructs the responder's stored root key from first principles (both DH
+  values plus the decapsulated ML-KEM secret), and shows the live root matches
+  that reconstruction while diverging from a classical-only, a PQ-only, and a
+  corrupted-ciphertext counterfactual. If the handshake ever stops mixing the
+  KEM secret, this suite fails.
+- **Known-answer vectors.** `scripts/gen-vectors.mjs` (run
+  `npm run gen:vectors`) replaces every random choice with fixed seeds, which
+  the noble APIs accept end to end, ML-KEM encapsulation included, and writes
+  `test/vectors.json`: the seeds, both DH values, the KEM ciphertext and shared
+  secret, the handshake root, the root evolution across the first two ratchet
+  steps, the first three message keys in each direction, and the exact wire
+  tokens for the invite, accept, and first message each way.
+  `test/vectors.test.ts` re-derives all of it from the seeds alone,
+  byte-compares every value, and finally feeds the vector tokens to the real
+  ratchet to prove they are genuine protocol traffic. The protocol is
+  reproducible by other implementations from the JSON alone.
+- **Persistence.** Sessions, pending invites, and identities survive
+  serialize/restore byte-exact, parked skipped keys included; truncated,
+  corrupted, mislabeled, and future-version state all fail closed with the
+  right reason.
+- **Binary payloads.** Random payloads round trip byte-exact, non-UTF-8 bytes
+  survive the wire untouched, string and byte tokens interoperate in both
+  directions, and a one-bit tamper on a bytes token fails closed and leaves the
+  session able to open the honest copy.
 
 Plus envelope round-trips across all three token kinds, deterministic
 fingerprints, out-of-order delivery across ratchet turns, and identity-mismatch
-handling. 20 tests.
+handling. 40 tests.
 
 ```sh
 npm install && npm test && npm run typecheck && npm run build

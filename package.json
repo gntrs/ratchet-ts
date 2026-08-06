@@ -1,6 +1,6 @@
 {
   "name": "ratchet-ts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. Forward secrecy, post-compromise security, and post-quantum handshake. MIT.",
   "license": "MIT",
   "author": {
@@ -17,7 +17,13 @@
     "e2ee",
     "signal-protocol",
     "xchacha20",
-    "pqxdh"
+    "pqxdh",
+    "encryption",
+    "cryptography",
+    "browser",
+    "bun",
+    "deno",
+    "session-persistence"
   ],
   "repository": {
     "type": "git",
@@ -49,6 +55,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
+    "gen:vectors": "tsx scripts/gen-vectors.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build",
     "prebench": "tsup",
     "bench": "node bench/bench.mjs"

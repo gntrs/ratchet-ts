@@ -254,6 +254,16 @@ export interface MessagingEngine {
   ): Promise<{ token: EnvelopeToken; session: SessionState }>;
 
   /**
+   * Encrypt raw bytes into an existing session. Same wire format as `seal`:
+   * the string API is a UTF-8 view over this one, so tokens from either API
+   * open under both.
+   */
+  sealBytes(
+    session: SessionState,
+    plaintext: Uint8Array,
+  ): Promise<{ token: EnvelopeToken; session: SessionState }>;
+
+  /**
    * Handle any inbound token. Dispatches on kind, so callers do not have to
    * know which stage of the handshake they are in.
    */
@@ -265,6 +275,15 @@ export interface MessagingEngine {
       pending?: PendingSession;
     },
   ): Promise<OpenResult>;
+
+  /**
+   * Decrypt a message token to raw bytes. Message tokens only: handshake
+   * tokens go through `open`, which owns the state machine.
+   */
+  openBytes(
+    session: SessionState,
+    token: EnvelopeToken,
+  ): Promise<{ plaintext: Uint8Array; session: SessionState }>;
 }
 
 // ---------------------------------------------------------------------------
