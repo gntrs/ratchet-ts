@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [main, dev]
   pull_request:
-    branches: [master]
+    branches: [main, dev]
 
 jobs:
   test:
@@ -24,3 +24,40 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # The library has no Node-specific imports, so it must run wherever
+  # WebCrypto exists. These jobs prove that claim on every push instead of
+  # leaving it as a README promise: build once with npm, then execute the
+  # runtime-agnostic smoke script under the alternative runtime itself.
+  bun:
+    runs-on: ubuntu-latest
+    name: bun
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # npm ci and the tsup build run on the runner's preinstalled Node.
+      # Only the smoke execution goes through Bun, because the artifact
+      # under test is the npm-built dist, exactly what users install.
+      - run: npm ci
+      - run: npm run build
+      - run: bun examples/runtime-smoke.mjs
+
+  deno:
+    runs-on: ubuntu-latest
+    name: deno
+    steps:
+      - uses: actions/checkout@v4
+      # Node is still needed here: npm ci creates the node_modules tree that
+      # Deno resolves the @noble bare specifiers from, and tsup builds dist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: npm ci
+      - run: npm run build
+      # --allow-read only: the script reads dist and node_modules, needs no
+      # network, no env, and no write access. Least privilege is the point.
+      - run: deno run --allow-read examples/runtime-smoke.mjs

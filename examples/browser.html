@@ -1,0 +1,160 @@
+<!doctype html>
+<!--
+  Browser smoke test for the built library.
+
+  Serve the repo root with any static server, for example:  npx serve
+  Then open  /examples/browser.html
+
+  Serving the root matters for two reasons: the page imports ../dist/index.js
+  (run "npm run build" first if dist/ is missing), and the import map below
+  points the @noble bare specifiers at /node_modules, because tsup keeps
+  those dependencies external in the ESM build, exactly as npm consumers
+  get them. No bundler, no framework: if this page shows green, the library
+  runs in a plain browser module script.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ratchet-ts browser smoke test</title>
+  <style>
+    /* System font, and color-scheme so the default canvas colors follow the
+       OS theme. Only the pass and fail accents are pinned, tuned to stay
+       readable on both light and dark backgrounds. */
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 44rem;
+      margin: 3rem auto;
+      padding: 0 1rem;
+      line-height: 1.6;
+    }
+    h1 { font-size: 1.2rem; font-weight: 600; }
+    p.sub { opacity: 0.7; margin-top: 0; }
+    #steps div {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.9rem;
+      padding: 0.15rem 0;
+    }
+    .pass::before { content: "PASS  "; color: #1a9c4b; font-weight: 700; }
+    .fail::before { content: "FAIL  "; color: #d8434e; font-weight: 700; }
+    #words {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 1.05rem;
+      letter-spacing: 0.03em;
+      margin-top: 1.25rem;
+      padding: 0.6rem 0.9rem;
+      border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+      border-radius: 6px;
+      display: none;
+    }
+    #verdict { font-weight: 700; margin-top: 1.25rem; }
+  </style>
+
+  <!-- dist/index.js imports @noble packages by bare specifier. Browsers do
+       not resolve those, so this map does what node_modules resolution does
+       everywhere else. Trailing slashes make each entry a prefix match that
+       covers subpath imports like @noble/hashes/sha2.js. -->
+  <script type="importmap">
+    {
+      "imports": {
+        "@noble/ciphers/": "/node_modules/@noble/ciphers/",
+        "@noble/curves/": "/node_modules/@noble/curves/",
+        "@noble/hashes/": "/node_modules/@noble/hashes/",
+        "@noble/post-quantum/": "/node_modules/@noble/post-quantum/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <h1>ratchet-ts browser smoke test</h1>
+  <p class="sub">Hybrid X25519 + ML-KEM-768 Double Ratchet, running as a plain browser module. No bundler.</p>
+  <div id="steps"></div>
+  <div id="words"></div>
+  <div id="verdict"></div>
+
+  <script type="module">
+    const stepsEl = document.getElementById('steps');
+    const wordsEl = document.getElementById('words');
+    const verdictEl = document.getElementById('verdict');
+
+    function line(ok, label) {
+      const div = document.createElement('div');
+      div.className = ok ? 'pass' : 'fail';
+      div.textContent = label;
+      stepsEl.appendChild(div);
+    }
+
+    // Same contract as examples/runtime-smoke.mjs: a failed check renders
+    // red and stops the run, because every later step would be noise built
+    // on broken state.
+    function check(condition, label) {
+      line(Boolean(condition), label);
+      if (!condition) throw new Error(`FAIL: ${label}`);
+    }
+
+    try {
+      const { engine, formatFingerprint, isCryptoFailure } = await import('../dist/index.js');
+
+      check(typeof globalThis.crypto?.getRandomValues === 'function', 'globalThis.crypto is available');
+
+      // Full handshake: Alice invites, Bob accepts, Alice completes.
+      const alice = await engine.createIdentity();
+      const bob = await engine.createIdentity();
+      const { token: inviteToken, pending } = await engine.invite(alice);
+      const bobOpen = await engine.open(bob, inviteToken, {});
+      check(bobOpen.outcome === 'invite', 'invite opens on the receiving side');
+      let bobSession = bobOpen.session;
+      const aliceOpen = await engine.open(alice, bobOpen.reply, { pending });
+      check(aliceOpen.outcome === 'accepted', 'accept completes the handshake');
+      let aliceSession = aliceOpen.session;
+
+      // The words exist to be compared out loud, so Bob's rendering of Alice
+      // must be identical to what Alice's own device would show.
+      const bobSeesAlice = formatFingerprint(bobOpen.peerFingerprint);
+      const aliceSelf = formatFingerprint(engine.fingerprint(engine.publicOf(alice)));
+      check(bobSeesAlice === aliceSelf, 'fingerprint matches on both sides');
+      wordsEl.textContent = bobSeesAlice;
+      wordsEl.style.display = 'block';
+
+      // One message each way. The direction change forces a ratchet step.
+      const a1 = await engine.seal(aliceSession, 'portable ciphertext, no runtime assumptions');
+      aliceSession = a1.session;
+      const b1 = await engine.open(bob, a1.token, { session: bobSession });
+      bobSession = b1.session;
+      check(
+        b1.outcome === 'message' && b1.plaintext === 'portable ciphertext, no runtime assumptions',
+        'alice to bob message decrypts',
+      );
+      const b2 = await engine.seal(bobSession, 'confirmed from the other side');
+      bobSession = b2.session;
+      const a2 = await engine.open(alice, b2.token, { session: aliceSession });
+      aliceSession = a2.session;
+      check(
+        a2.outcome === 'message' && a2.plaintext === 'confirmed from the other side',
+        'bob to alice reply decrypts',
+      );
+
+      // Tamper: flip one character of a fresh ciphertext. It must fail
+      // closed with the library's own deliberate error, never plaintext.
+      const a3 = await engine.seal(aliceSession, 'this line is corrupted in transit');
+      const chars = a3.token.split('');
+      chars[chars.length - 3] = chars[chars.length - 3] === 'A' ? 'B' : 'A';
+      let rejected = false;
+      try {
+        await engine.open(bob, chars.join(''), { session: bobSession });
+      } catch (error) {
+        rejected = isCryptoFailure(error);
+      }
+      check(rejected, 'tampered token is rejected with a deliberate crypto failure');
+
+      verdictEl.textContent = `PASS ${navigator.userAgent}`;
+    } catch (error) {
+      // Import failures land here too, most often because the repo root is
+      // not being served or dist/ has not been built yet.
+      line(false, error?.message ?? String(error));
+      verdictEl.textContent = 'FAIL: see steps above. Serve the repo root and run "npm run build" first.';
+    }
+  </script>
+</body>
+</html>

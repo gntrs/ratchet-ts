@@ -27,7 +27,7 @@ import { decodeEnvelope, encodeEnvelope } from './envelope.js';
 import { fail } from './errors.js';
 import { acceptInvite, beginInvite, completeInvite } from './handshake.js';
 import { createIdentity, fingerprint, publicOf, sameIdentity } from './identity.js';
-import { ratchetDecrypt, ratchetEncrypt } from './ratchet.js';
+import { ratchetDecrypt, ratchetDecryptBytes, ratchetEncrypt, ratchetEncryptBytes } from './ratchet.js';
 
 async function engineCreateIdentity(): Promise<IdentityKeyPair> {
   return createIdentity();
@@ -45,6 +45,40 @@ async function engineSeal(
 ): Promise<{ token: EnvelopeToken; session: SessionState }> {
   const sealed = ratchetEncrypt(session, plaintext);
   return { token: encodeEnvelope(sealed.payload), session: sealed.session };
+}
+
+/**
+ * Byte counterpart of `seal`. Same session advance, same token format: the
+ * wire carries raw bytes either way, so a token from `sealBytes` opens under
+ * `open` (as the UTF-8 decoding of the bytes) and a token from `seal` opens
+ * under `openBytes` (as the exact UTF-8 encoding of the string). Use this
+ * path for anything not guaranteed to be valid UTF-8: files, images,
+ * protobuf.
+ */
+async function engineSealBytes(
+  session: SessionState,
+  plaintext: Uint8Array,
+): Promise<{ token: EnvelopeToken; session: SessionState }> {
+  const sealed = ratchetEncryptBytes(session, plaintext);
+  return { token: encodeEnvelope(sealed.payload), session: sealed.session };
+}
+
+/**
+ * Byte counterpart of `open`, deliberately narrower: message tokens only.
+ * Handshake tokens (invite, accept) are protocol, not payload, and already
+ * have a home in `open`, so a binary-payload caller is never forced to handle
+ * handshake outcomes it cannot receive. No identity parameter for the same
+ * reason: decrypting a ratcheted message needs only the session.
+ */
+async function engineOpenBytes(
+  session: SessionState,
+  token: EnvelopeToken,
+): Promise<{ plaintext: Uint8Array; session: SessionState }> {
+  const payload = decodeEnvelope(token);
+  if (payload.kind !== 'message') {
+    fail('malformed_token', `expected a message token, got ${payload.kind}`);
+  }
+  return ratchetDecryptBytes(session, payload);
 }
 
 /**
@@ -103,7 +137,9 @@ export const engine: MessagingEngine = {
   fingerprint,
   invite: engineInvite,
   seal: engineSeal,
+  sealBytes: engineSealBytes,
   open: engineOpen,
+  openBytes: engineOpenBytes,
 };
 
 // ---------------------------------------------------------------------------
@@ -147,4 +183,12 @@ export { isCryptoFailure, CryptoFailureError } from './errors.js';
 export { fingerprint, publicOf, sameIdentity } from './identity.js';
 export { MAX_SKIP } from './ratchet.js';
 export { ENVELOPE_VERSION, decodeEnvelope, encodeEnvelope } from './envelope.js';
+export {
+  serializeSession,
+  deserializeSession,
+  serializePending,
+  deserializePending,
+  exportIdentity,
+  importIdentity,
+} from './serialize.js';
 export type * from './contract.js';
