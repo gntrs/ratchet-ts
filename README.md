@@ -360,12 +360,12 @@ Single thread, no tuning. `--runs N` repeats the whole bench and reports the spr
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: Apple M1 6.2, i5-12500H 6.5, Ryzen 7 5800X3D 7.3, EPYC 9354P 8.9, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5, Ryzen 5 7530U 13.8. Lower is better." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: Apple M1 6.2, i5-12500H 6.5, Ryzen 7 5800X3D 7.3, Ryzen 5 7530U 7.6, EPYC 9354P 8.9, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5. Lower is better." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: Apple M1 0.019, i5-12500H 0.025, Ryzen 7 5800X3D 0.028, EPYC 9354P 0.050, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042, Ryzen 5 7530U 0.061. Lower is better." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: Apple M1 0.019, i5-12500H 0.025, Ryzen 7 5800X3D 0.028, Ryzen 5 7530U 0.031, EPYC 9354P 0.050, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042. Lower is better." width="760">
 </picture>
 
 | Machine | Node | Handshake | `seal` 256 B | `open` 256 B |
@@ -373,10 +373,10 @@ Single thread, no tuning. `--runs N` repeats the whole bench and reports the spr
 | Apple M1 (laptop 2020, macOS) | | 6.2 ms | 0.019 ms | 0.021 ms |
 | Core i5-12500H (laptop 2022) | 24 | 6.5 ms | 0.025 ms | 0.026 ms |
 | Ryzen 7 5800X3D (desktop) | 24 | 7.3 ms | 0.028 ms | 0.031 ms |
+| Ryzen 5 7530U (laptop) | 25 | 7.6 ms | 0.031 ms | 0.033 ms |
 | EPYC 9354P 32-core (VPS, Linux) | 22 | 8.9 ms | 0.050 ms | 0.051 ms |
 | Core i5-10400F (desktop 2020, WSL) | 22 | 10.9 ms | 0.053 ms | 0.057 ms |
 | Core i5-10400F (same box, Windows) | 24 | 11.5 ms | 0.042 ms | 0.044 ms |
-| Ryzen 5 7530U (laptop) | 25 | 13.8 ms | 0.061 ms | 0.065 ms |
 
 The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Ciphertext overhead is a constant **+259 bytes per message** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware.
 
@@ -384,7 +384,35 @@ The bench is single-core bound, so a newer core beats a bigger machine. The fast
 
 The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. For scale, three back-to-back runs on the idle VPS varied by 3.3 percent on both handshake and `seal`, so single-digit gaps are run-to-run noise and only the larger one is worth a second look. `keygen` on that same VPS spread 33 percent across the three runs, which is what a noisy neighbour on shared hardware looks like and the reason `--runs` prints the spread at all.
 
+The 7530U row is a correction. It first went in the table at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it is 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. A bench number is only as good as the machine was quiet, so `--runs` exists and the spread is printed.
+
 The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs); a fixed-iteration CI bench is planned so numbers only move when the code does.
+
+### 0.1.0 to 0.2.0
+
+Both versions installed side by side on one machine, same probe run against each, 200 iterations per op:
+
+| | 0.1.0 | 0.2.0 | Change |
+|---|---|---|---|
+| `keygen` | 1.315 ms | 1.321 ms | +0.5% |
+| Handshake | 10.197 ms | 10.337 ms | +1.4% |
+| `seal` 256 B | 0.051 ms | 0.053 ms | +3.9% |
+| `open` 256 B | 0.049 ms | 0.053 ms | +8.2% |
+| Wire overhead | +259 B | +259 B | none |
+| Exports | 12 | 18 | +6 |
+| Survives a restart | no | yes | |
+| 1 KiB binary payload on the wire | 2227 B | 1539 B | **31% smaller** |
+
+Read the first four rows as flat. They are cold-start numbers with no warmup and a fresh pair of identities per iteration, which is why they sit above the table above; only the deltas are meaningful, and every one of them is inside the run-to-run noise this bench shows on an idle machine. The byte-first rewrite made the string API a UTF-8 shim over the byte path, and it cost nothing measurable.
+
+The last row is the one that moved. 0.1.0 had no bytes API, so the only way to send a file was to smuggle it through the string API with `String.fromCharCode`, and every byte above 0x7f became two bytes of UTF-8 on the way out. `sealBytes` takes the `Uint8Array` straight to the AEAD:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/charts/wire-dark.svg">
+  <img src="bench/charts/wire-light.svg" alt="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 workaround 2227 bytes, 0.2.0 sealBytes 1539 bytes, 31 percent fewer." width="760">
+</picture>
+
+The other change has no number. On 0.1.0, `JSON.stringify` on a session silently turned every `Uint8Array` key into `{}`, and the next `seal` threw `"key" expected Uint8Array`. A page reload ended the conversation. On 0.2.0 the session is a token you can put in a database and hand back later.
 
 ## License
 
