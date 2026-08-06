@@ -340,20 +340,21 @@ npm install && npm test && npm run typecheck && npm run build
 npm run bench
 ```
 
-Single thread, no tuning. `--runs N` repeats the whole bench and reports the spread across runs. Six runs on five machines so far, medians:
+Single thread, no tuning. `--runs N` repeats the whole bench and reports the spread across runs. Seven runs on six machines so far, medians:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: i5-12500H 6.5, Ryzen 7 5800X3D 7.3, EPYC 9354P 8.9, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5, Ryzen 5 7530U 13.8. Lower is better." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: Apple M1 6.2, i5-12500H 6.5, Ryzen 7 5800X3D 7.3, EPYC 9354P 8.9, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5, Ryzen 5 7530U 13.8. Lower is better." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: i5-12500H 0.025, Ryzen 7 5800X3D 0.028, EPYC 9354P 0.050, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042, Ryzen 5 7530U 0.061. Lower is better." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: Apple M1 0.019, i5-12500H 0.025, Ryzen 7 5800X3D 0.028, EPYC 9354P 0.050, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042, Ryzen 5 7530U 0.061. Lower is better." width="760">
 </picture>
 
 | Machine | Node | Handshake | `seal` 256 B | `open` 256 B |
 |---|---|---|---|---|
+| Apple M1 (laptop 2020, macOS) | | 6.2 ms | 0.019 ms | 0.021 ms |
 | Core i5-12500H (laptop 2022) | 24 | 6.5 ms | 0.025 ms | 0.026 ms |
 | Ryzen 7 5800X3D (desktop) | 24 | 7.3 ms | 0.028 ms | 0.031 ms |
 | EPYC 9354P 32-core (VPS, Linux) | 22 | 8.9 ms | 0.050 ms | 0.051 ms |
@@ -363,7 +364,7 @@ Single thread, no tuning. `--runs N` repeats the whole bench and reports the spr
 
 The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Ciphertext overhead is a constant **+259 bytes per message** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware.
 
-The bench is single-core bound, so a newer core beats a bigger machine. The 2022 laptop chip outruns the 5800X3D desktop, and a 32-core EPYC server lands mid-table: core count buys concurrent sessions, not a faster handshake.
+The bench is single-core bound, so a newer core beats a bigger machine. The fastest row is a 2020 ultrabook: the M1 tops every column, and the 2022 laptop chip behind it still outruns the 5800X3D desktop, while a 32-core EPYC server lands mid-table. Core count buys concurrent sessions, not a faster handshake. The M1 run did not record its Node version, and it was measured on 0.1.0, before the byte-first ratchet rewrite in 0.2.0.
 
 The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. For scale, three back-to-back runs on the idle VPS varied by 3.3 percent on both handshake and `seal`, so single-digit gaps are run-to-run noise and only the larger one is worth a second look. `keygen` on that same VPS spread 33 percent across the three runs, which is what a noisy neighbour on shared hardware looks like and the reason `--runs` prints the spread at all.
 

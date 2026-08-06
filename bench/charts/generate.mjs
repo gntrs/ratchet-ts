@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 const MACHINES = [
+  { label: 'Apple M1', sub: 'laptop 2020, macOS', handshake: 6.2, seal: 0.019 },
   { label: 'Core i5-12500H', sub: 'laptop 2022, Windows · Node 24', handshake: 6.5, seal: 0.025 },
   { label: 'Ryzen 7 5800X3D', sub: 'desktop, Windows · Node 24', handshake: 7.3, seal: 0.028 },
   { label: 'EPYC 9354P 32-core', sub: 'VPS, Linux · Node 22', handshake: 8.9, seal: 0.050 },
