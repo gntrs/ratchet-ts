@@ -3,3 +3,12 @@ dist/
 *.tgz
 *.log
 .DS_Store
+
+# Written by `deno run` when it resolves the npm bare specifiers during the
+# runtime smoke check. It is a cache artifact of a check, not a dependency
+# manifest this project maintains, so it must not become tracked noise.
+deno.lock
+
+# Scratch directory used to install and exercise the packed tarball. It holds a
+# full node_modules tree and would otherwise be committed by a careless add.
+packsmoke/
