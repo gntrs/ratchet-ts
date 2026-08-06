@@ -1,0 +1,12 @@
+# bin/ratchet.mjs starts with a shebang. If git checks it out with CRLF on a
+# Windows clone, the kernel on the receiving Linux box reads the interpreter as
+# "node\r" and the CLI dies with "bad interpreter". Since releases are packed
+# from a fresh clone, that would ship a binary that only breaks on the platform
+# it is most likely to run on. Pin every source file to LF regardless of
+# core.autocrlf on the machine doing the checkout.
+* text=auto eol=lf
+
+# Anything genuinely binary must not be touched at all.
+*.png binary
+*.jpg binary
+*.tgz binary
