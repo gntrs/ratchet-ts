@@ -130,13 +130,15 @@ function dhRatchet(draft: Draft, payload: MessagePayload): void {
   draft.selfRatchetSecret = fresh.secretKey;
 }
 
-function open(messageKey: Uint8Array, payload: MessagePayload): string | null {
+/**
+ * AEAD open at the byte layer. Every decrypt path funnels through here, so the
+ * Poly1305 verdict is decided in exactly one place. Returns the raw plaintext
+ * bytes; whether they mean UTF-8 text is the caller's business, not the AEAD's.
+ */
+function open(messageKey: Uint8Array, payload: MessagePayload): Uint8Array | null {
   const aad = messageAad(payload);
   try {
-    const plain = xchacha20poly1305(messageKey, payload.nonce, aad).decrypt(payload.ciphertext);
-    const text = bytesToUtf8(plain);
-    wipe(plain);
-    return text;
+    return xchacha20poly1305(messageKey, payload.nonce, aad).decrypt(payload.ciphertext);
   } catch {
     // Poly1305 said no. There is nothing to recover here and no partial result
     // worth returning, so the only correct move is to fail closed.
@@ -144,7 +146,22 @@ function open(messageKey: Uint8Array, payload: MessagePayload): string | null {
   }
 }
 
-export function ratchetEncrypt(session: SessionState, plaintext: string): { payload: MessagePayload; session: SessionState } {
+/**
+ * Byte-level encrypt. This is the ratchet itself: the string API below is a
+ * UTF-8 shim over this function, not a second implementation.
+ *
+ * Interop rule, stated here so it cannot drift: the wire format is raw bytes,
+ * exactly as it was before this function existed. The string path UTF-8
+ * encodes before sealing and UTF-8 decodes after opening, so a message sealed
+ * by either API opens under both. Bytes sealed here come out of the string API
+ * as their UTF-8 decoding (lossy if the bytes were not valid UTF-8, so use the
+ * bytes API for binary payloads), and a sealed string comes out of the bytes
+ * API as exactly its UTF-8 encoding.
+ *
+ * The plaintext buffer belongs to the caller and is neither modified nor wiped
+ * here. Zero it after the call if it is secret.
+ */
+export function ratchetEncryptBytes(session: SessionState, plaintext: Uint8Array): { payload: MessagePayload; session: SessionState } {
   if (session.sendChainKey === undefined) {
     fail('no_session', 'no send chain yet, wait for the peer to send the first message');
   }
@@ -157,7 +174,7 @@ export function ratchetEncrypt(session: SessionState, plaintext: string): { payl
     previousChainLength: session.previousSendCount,
     nonce,
   };
-  const ciphertext = xchacha20poly1305(step.messageKey, nonce, messageAad(header)).encrypt(utf8ToBytes(plaintext));
+  const ciphertext = xchacha20poly1305(step.messageKey, nonce, messageAad(header)).encrypt(plaintext);
   wipe(step.messageKey);
 
   return {
@@ -166,7 +183,30 @@ export function ratchetEncrypt(session: SessionState, plaintext: string): { payl
   };
 }
 
-export function ratchetDecrypt(session: SessionState, payload: MessagePayload): { plaintext: string; session: SessionState } {
+/**
+ * String encrypt. Signature and behaviour are unchanged from before the byte
+ * layer existed: existing callers must never notice the refactor. It is a thin
+ * shim so there is exactly one ratchet implementation to audit. The transient
+ * UTF-8 copy is ours alone, which is why wiping it here is safe.
+ */
+export function ratchetEncrypt(session: SessionState, plaintext: string): { payload: MessagePayload; session: SessionState } {
+  const encoded = utf8ToBytes(plaintext);
+  const sealed = ratchetEncryptBytes(session, encoded);
+  wipe(encoded);
+  return sealed;
+}
+
+/**
+ * Byte-level decrypt, the mirror of `ratchetEncryptBytes` and the single real
+ * implementation of the receive side. See the interop rule on
+ * `ratchetEncryptBytes`: the token carries raw bytes, so this opens anything
+ * the string API sealed and vice versa.
+ *
+ * The returned plaintext buffer is owned by the caller. It is a fresh
+ * allocation per call, so wiping it after use is both safe and encouraged when
+ * the payload is secret.
+ */
+export function ratchetDecryptBytes(session: SessionState, payload: MessagePayload): { plaintext: Uint8Array; session: SessionState } {
   if (payload.conversationId !== session.conversationId) {
     fail('no_session', 'message belongs to a different conversation');
   }
@@ -180,12 +220,12 @@ export function ratchetDecrypt(session: SessionState, payload: MessagePayload): 
   const parkedId = skipKeyId(payload.ratchetPublic, payload.messageNumber);
   const parked = session.skippedKeys[parkedId];
   if (parked !== undefined) {
-    const text = open(parked, payload);
-    if (text === null) fail('authentication_failed', 'ciphertext failed authentication');
+    const plain = open(parked, payload);
+    if (plain === null) fail('authentication_failed', 'ciphertext failed authentication');
     const draft = draftOf(session);
     delete draft.skipped[parkedId];
     wipe(parked);
-    return { plaintext: text, session: commit(session, draft) };
+    return { plaintext: plain, session: commit(session, draft) };
   }
 
   const draft = draftOf(session);
@@ -204,11 +244,25 @@ export function ratchetDecrypt(session: SessionState, payload: MessagePayload): 
   }
 
   const step = kdfChain(draft.recvChainKey);
-  const text = open(step.messageKey, payload);
+  const plain = open(step.messageKey, payload);
   wipe(step.messageKey);
-  if (text === null) fail('authentication_failed', 'ciphertext failed authentication');
+  if (plain === null) fail('authentication_failed', 'ciphertext failed authentication');
 
   draft.recvChainKey = step.nextChainKey;
   draft.recvCount += 1;
-  return { plaintext: text, session: commit(session, draft) };
+  return { plaintext: plain, session: commit(session, draft) };
+}
+
+/**
+ * String decrypt, unchanged signature and behaviour. Decodes the opened bytes
+ * as UTF-8 and wipes the intermediate buffer, because once the text exists the
+ * byte copy is just one more place the plaintext lives. Note the decode is
+ * lossy on invalid UTF-8 (replacement characters), which is exactly why binary
+ * payloads should travel through `ratchetDecryptBytes` instead.
+ */
+export function ratchetDecrypt(session: SessionState, payload: MessagePayload): { plaintext: string; session: SessionState } {
+  const opened = ratchetDecryptBytes(session, payload);
+  const text = bytesToUtf8(opened.plaintext);
+  wipe(opened.plaintext);
+  return { plaintext: text, session: opened.session };
 }
