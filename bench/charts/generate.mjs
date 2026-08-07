@@ -10,6 +10,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const MACHINES = [
   { label: 'Apple M1', sub: 'laptop 2020, macOS', handshake: 6.2, seal: 0.019 },
   { label: 'Core i5-12500H', sub: 'laptop 2022, Windows · Node 24', handshake: 6.5, seal: 0.025 },
+  { label: 'Core i5-12450H', sub: 'laptop 2022, Windows · Node 24', handshake: 7.0, seal: 0.023 },
   { label: 'Ryzen 7 5800X3D', sub: 'desktop, Windows · Node 24', handshake: 7.3, seal: 0.028 },
   { label: 'Ryzen 5 7530U', sub: 'laptop, Windows · Node 25', handshake: 7.6, seal: 0.031 },
   { label: 'EPYC 9354P 32-core', sub: 'VPS, Linux · Node 22', handshake: 8.9, seal: 0.050 },
