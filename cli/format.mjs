@@ -48,6 +48,77 @@ function visibleWidth(s) {
   return stripAnsi(s).length;
 }
 
+// Splits a string into a flat list where each entry is either one escape
+// sequence (zero visible columns) or one visible character. Truncating by raw
+// string index would cut an escape in half and spray the rest of the sequence
+// across the terminal as literal text.
+function ansiTokens(s) {
+  const out = [];
+  const re = new RegExp(ANSI_RE.source, 'g');
+  let i = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    for (const ch of s.slice(i, m.index)) out.push({ esc: false, t: ch });
+    out.push({ esc: true, t: m[0] });
+    i = m.index + m[0].length;
+  }
+  for (const ch of s.slice(i)) out.push({ esc: false, t: ch });
+  return out;
+}
+
+const ELLIPSIS = '...';
+
+// Drops characters out of the middle rather than the end. Every line we box is
+// a short label followed by a long value, and for a filesystem path the two
+// parts worth keeping are the label at the front and the filename at the back.
+// Chopping the tail would leave "identity  C:\Users\ginta\AppData\Local\Te",
+// which names no file the reader can act on.
+export function ellipsize(s, budget) {
+  const text = String(s);
+  if (budget < ELLIPSIS.length + 2) return text;
+  if (visibleWidth(text) <= budget) return text;
+
+  const toks = ansiTokens(text);
+  const keep = budget - ELLIPSIS.length;
+  const headWidth = Math.ceil(keep / 2);
+  const tailWidth = keep - headWidth;
+
+  const head = [];
+  let seen = 0;
+  let coloured = false;
+  for (const tok of toks) {
+    if (tok.esc) { head.push(tok.t); coloured = true; continue; }
+    if (seen >= headWidth) break;
+    head.push(tok.t);
+    seen++;
+  }
+
+  const tail = [];
+  seen = 0;
+  for (let i = toks.length - 1; i >= 0; i--) {
+    const tok = toks[i];
+    if (tok.esc) { tail.unshift(tok.t); coloured = true; continue; }
+    if (seen >= tailWidth) break;
+    tail.unshift(tok.t);
+    seen++;
+  }
+
+  // Escapes from the dropped middle are gone, so an opener kept in the head can
+  // outlive its reset. Close explicitly rather than bleed colour down the page.
+  const reset = coloured ? '\x1b[0m' : '';
+  return head.join('') + reset + ELLIPSIS + tail.join('');
+}
+
+// Boxes are drawn to the terminal, so the terminal decides how wide they get.
+// Capped at 100 because a full width box on an ultrawide monitor is a worse
+// read than a narrow one, and floored at 80 when stdout is a pipe or a file,
+// where there is no width to ask about.
+function terminalWidth() {
+  const c = process.stdout.columns;
+  if (Number.isInteger(c) && c >= 40) return Math.min(c, 100);
+  return 80;
+}
+
 // Base 1000, not 1024: this sits next to throughputMBs, which is already
 // decimal megabytes, and mixing bases in the same table is how you get a
 // support ticket asking why the percentages don't add up.
@@ -91,6 +162,9 @@ export function statsTable(stats, { direction } = {}) {
     ['Chunks', `${stats.chunks} x ${humanBytes(stats.chunkSize)}`],
     ['Handshake', humanMs(stats.handshakeMs)],
     ['Crypto', humanMs(stats.cryptoMs)],
+    // A 0.2.x stats object has no backend field, so the row disappears
+    // instead of printing undefined.
+    ...(stats.backend ? [['AEAD backend', String(stats.backend)]] : []),
     ['Wall time', humanMs(stats.wallMs)],
     ['Throughput', color.cyan(`${stats.throughputMBs.toFixed(2)} MB/s`)],
     ['SHA-256', color.dim(String(stats.sha256).slice(0, 16))],
@@ -141,8 +215,12 @@ export function progressLine({ done, total, label }) {
 }
 
 export function box(title, lines) {
-  const titleText = String(title);
-  const bodyLines = lines.map((l) => String(l));
+  // Two border columns each side, so this is what a body line may occupy. The
+  // title sits inside "|- " and " -", two columns more than a body line, so it
+  // gets the tighter budget or a long title pushes the box past the terminal.
+  const budget = terminalWidth() - 4;
+  const titleText = ellipsize(title, budget - 2);
+  const bodyLines = lines.map((l) => ellipsize(l, budget));
 
   const inner = Math.max(visibleWidth(titleText), ...bodyLines.map(visibleWidth), 0);
   // Room for "- title -" on the top edge plus at least one trailing dash,

@@ -183,6 +183,26 @@ export { isCryptoFailure, CryptoFailureError } from './errors.js';
 export { fingerprint, publicOf, sameIdentity } from './identity.js';
 export { MAX_SKIP } from './ratchet.js';
 export { ENVELOPE_VERSION, decodeEnvelope, encodeEnvelope } from './envelope.js';
+/**
+ * Binary envelope codec, additive in 0.3.0.
+ *
+ * Deliberately not folded into `engine`: `engine.sealBytes` is about the
+ * PLAINTEXT being bytes and still hands back a pasteable token, while these two
+ * are about the ENVELOPE being bytes. Same layer confusion would be guaranteed
+ * if both lived on one object under similar names.
+ *
+ * Reach for these when the transport is already binary. Keep `encodeEnvelope`
+ * when the transport is a human.
+ */
+export { decodeEnvelopeBytes, encodeEnvelopeBytes } from './envelope.js';
+/**
+ * Reporting only. `aeadBackend()` says which implementation the next seal will
+ * use so a slow run can be explained rather than guessed at. `sealAead` and
+ * `openAead` are exposed because a caller already trusting this library for
+ * XChaCha20-Poly1305 should not have to add a second cipher dependency to use
+ * it outside a ratchet.
+ */
+export { aeadBackend, aeadReady, openAead, sealAead } from './aead.js';
 export {
   serializeSession,
   deserializeSession,

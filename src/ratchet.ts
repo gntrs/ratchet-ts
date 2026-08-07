@@ -1,8 +1,8 @@
 import { x25519 } from '@noble/curves/ed25519.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 
 import type { MessagePayload, SessionState } from './contract.js';
+import { openAeadSync, sealAeadSync } from './aead.js';
 import { bytesToUtf8, equal, toBase64Url, utf8ToBytes, wipe } from './bytes.js';
 import { messageAad } from './envelope.js';
 import { fail } from './errors.js';
@@ -134,14 +134,21 @@ function dhRatchet(draft: Draft, payload: MessagePayload): void {
  * AEAD open at the byte layer. Every decrypt path funnels through here, so the
  * Poly1305 verdict is decided in exactly one place. Returns the raw plaintext
  * bytes; whether they mean UTF-8 text is the caller's business, not the AEAD's.
+ *
+ * The synchronous variant is deliberate. `openAeadSync` picks the backend from
+ * an already resolved cache, so it never awaits, and the whole ratchet API is
+ * synchronous underneath the async engine facade. Reaching for the promise
+ * returning form here would make every caller async for no change in output.
  */
 function open(messageKey: Uint8Array, payload: MessagePayload): Uint8Array | null {
   const aad = messageAad(payload);
   try {
-    return xchacha20poly1305(messageKey, payload.nonce, aad).decrypt(payload.ciphertext);
+    return openAeadSync(messageKey, payload.nonce, payload.ciphertext, aad);
   } catch {
     // Poly1305 said no. There is nothing to recover here and no partial result
-    // worth returning, so the only correct move is to fail closed.
+    // worth returning, so the only correct move is to fail closed. Catching
+    // rather than propagating also keeps the reason the caller sees decided by
+    // the ratchet, which distinguishes a bad tag from a replay.
     return null;
   }
 }
@@ -174,7 +181,7 @@ export function ratchetEncryptBytes(session: SessionState, plaintext: Uint8Array
     previousChainLength: session.previousSendCount,
     nonce,
   };
-  const ciphertext = xchacha20poly1305(step.messageKey, nonce, messageAad(header)).encrypt(plaintext);
+  const ciphertext = sealAeadSync(step.messageKey, nonce, plaintext, messageAad(header));
   wipe(step.messageKey);
 
   return {
