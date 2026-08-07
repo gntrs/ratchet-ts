@@ -45,6 +45,13 @@ const engine = lib.engine;
  *
  * The two rows worth comparing are the byte counts and the crypto time. Those
  * are protocol and CPU, so they mean the same thing on any link.
+ *
+ * A genuine before and after over the same link does now exist, and it is not
+ * in this file. The repository README, under "The same file over a real
+ * network", moves this same 763.5 kB file over the same relayed VPN on 0.2.1
+ * and again on 0.3.0, minutes apart. That pair is comparable to itself, at one
+ * run each, and it is still not comparable to anything measured here on
+ * loopback, so the NOT COMPARABLE cell in section 4 stays exactly where it is.
  */
 const BASELINE_0_2_1 = Object.freeze({
   label: '0.2.1 over a Tailscale DERP relay',
@@ -757,6 +764,186 @@ async function measureRoundTrip(iterations = 200) {
 }
 
 // ---------------------------------------------------------------------------
+// Section 5: representation cost, token versus bytes
+// ---------------------------------------------------------------------------
+//
+// Nothing else in this file measures the thing 0.3.1 is about, so this section
+// does, and it measures it on this machine rather than quoting anybody.
+//
+// engine.seal and engine.sealBytes hand back an OCX1 token, which is base64url
+// over the envelope body, and engine.open and engine.openBytes take one. The
+// wire is binary. Up to and including 0.3.0 that meant every chunk frame got
+// base64 encoded and then immediately decoded again on each side, purely to
+// cross an API that speaks strings:
+//
+//   sender    engine.sealBytes -> encodeEnvelope        encode
+//             cli toWire       -> decodeEnvelope        decode
+//   receiver  cli fromWire     -> encodeEnvelope        encode
+//             engine.openBytes -> decodeEnvelope        decode
+//
+// Each of those pairs is a round trip that ends where it began, which is why
+// this section reports round trips and not single calls: one per endpoint, two
+// per frame, and not one byte on the socket differed either way.
+//
+// 0.3.1 deleted both of them for chunk frames. engine.sealToEnvelopeBytes goes
+// from plaintext bytes to envelope bytes and engine.openFromEnvelopeBytes comes
+// back, so the token is never built. The measurement below is therefore the
+// size of what was removed, and it stays in the file because a saving nobody
+// can re-measure is a claim, not a result.
+//
+// The bytes rows are not the alternative to subtract. They are what a transfer
+// paid inside toWire and fromWire before and goes on paying now, since
+// something still has to write the envelope out and read it back in. What
+// disappeared is the token round trip, whole, twice. That is why the arithmetic
+// below subtracts nothing from it.
+
+/**
+ * Both endpoints paid one full base64 round trip per chunk frame in 0.3.0, so a
+ * frame that crossed the wire cost two. Counted from the four call sites listed
+ * above rather than assumed. As of 0.3.1 the chunk path pays neither, so this
+ * is a historical figure: it sizes what the release removed, and it is not a
+ * description of what cli/protocol.mjs does now.
+ */
+const CLI_BASE64_ROUND_TRIPS_PER_FRAME_0_3_0 = 2;
+
+/** One file's worth of chunks, at the size the section 4 baseline uses. */
+const REPR_FILE_BYTES = BASELINE_SIZE;
+const REPR_CHUNKS = chunkCount(REPR_FILE_BYTES);
+
+// Each rep is 12 encodes plus 12 decodes, so a rep is already an average over
+// the workload. 21 of them is enough for a median to stop moving between runs
+// while keeping the whole section under a second.
+const REPR_REPS = 21;
+
+/**
+ * Real sealed chunks, not synthetic ones.
+ *
+ * The envelopes are produced by driving an actual handshake and then sealing
+ * actual chunks, so the ratchet key, nonce, message numbers and ciphertext
+ * length are what a transfer really carries. A hand built payload would time
+ * the same code but would let a wrong field length go unnoticed.
+ */
+async function representationWorkload() {
+  const alice = await engine.createIdentity();
+  const bob = await engine.createIdentity();
+
+  // The receiver invites and the sender accepts, matching the CLI. The sender
+  // is therefore the Double Ratchet responder and cannot seal anything until
+  // the receiver has spoken once, which is what the ready frame is for.
+  const invited = await engine.invite(bob);
+  const senderOpen = await engine.open(alice, invited.token, {});
+  const receiverOpen = await engine.open(bob, senderOpen.reply, { pending: invited.pending });
+  const ready = await engine.seal(
+    receiverOpen.session,
+    JSON.stringify({ v: PROTOCOL_VERSION, ready: true }),
+  );
+  const readyOpen = await engine.open(alice, ready.token, { session: senderOpen.session });
+
+  let session = readyOpen.session;
+  const bytes = randomBytes(REPR_FILE_BYTES);
+  const tokens = [];
+  for (let i = 0; i < REPR_CHUNKS; i += 1) {
+    const start = i * CHUNK;
+    const slice = bytes.subarray(start, Math.min(start + CHUNK, REPR_FILE_BYTES));
+    const sealed = await engine.sealBytes(session, slice);
+    session = sealed.session;
+    tokens.push(sealed.token);
+  }
+
+  const payloads = tokens.map((t) => lib.decodeEnvelope(t));
+  const frames = HAS_ENVELOPE_BYTES ? payloads.map((p) => lib.encodeEnvelopeBytes(p)) : [];
+  return { payloads, tokens, frames };
+}
+
+/**
+ * The claim this whole section rests on: the shortcut is a shortcut.
+ *
+ * A bytes native path is only allowed to exist if the payload that comes back
+ * out of either codec re-encodes to the same token and the same frame the long
+ * way round produced. If that ever stops holding, the saved milliseconds were
+ * bought by changing the wire, which is a different and much worse release.
+ */
+function verifyRepresentationIdentity({ payloads, tokens, frames }) {
+  let tokenMatches = 0;
+  let frameMatches = 0;
+  let firstFailure = null;
+
+  for (let i = 0; i < payloads.length; i += 1) {
+    // Payload out of the byte codec, back to a token: this is what cli fromWire
+    // did, followed by whatever the engine would have handed the caller.
+    if (HAS_ENVELOPE_BYTES) {
+      const viaBytes = lib.encodeEnvelope(lib.decodeEnvelopeBytes(frames[i]));
+      if (viaBytes === tokens[i]) tokenMatches += 1;
+      else if (!firstFailure) firstFailure = `token differs after a byte round trip at chunk ${i}`;
+
+      // Payload out of the token codec, back to a frame: this is what cli
+      // toWire did.
+      const viaToken = lib.encodeEnvelopeBytes(lib.decodeEnvelope(tokens[i]));
+      if (Buffer.compare(Buffer.from(viaToken), Buffer.from(frames[i])) === 0) frameMatches += 1;
+      else if (!firstFailure) firstFailure = `frame differs after a token round trip at chunk ${i}`;
+    } else {
+      const viaToken = lib.encodeEnvelope(lib.decodeEnvelope(tokens[i]));
+      if (viaToken === tokens[i]) tokenMatches += 1;
+      else if (!firstFailure) firstFailure = `token differs after a token round trip at chunk ${i}`;
+    }
+  }
+
+  return { samples: payloads.length, tokenMatches, frameMatches, firstFailure, firstToken: tokens[0] };
+}
+
+async function measureRepresentation({ reps = REPR_REPS } = {}) {
+  const workload = await representationWorkload();
+  const { payloads, tokens, frames } = workload;
+
+  const samples = {
+    encodeToken: [],
+    encodeBytes: [],
+    decodeToken: [],
+    decodeBytes: [],
+    roundTripToken: [],
+    roundTripBytes: [],
+  };
+
+  // Every loop feeds a length into this. Not paranoia about correctness, which
+  // verifyRepresentationIdentity handles: it is here so the optimiser cannot
+  // delete a loop whose result nothing reads and hand back a zero.
+  let sink = 0;
+
+  for (let r = 0; r < reps; r += 1) {
+    let t0 = performance.now();
+    for (const p of payloads) sink += lib.encodeEnvelope(p).length;
+    samples.encodeToken.push(performance.now() - t0);
+
+    t0 = performance.now();
+    for (const t of tokens) sink += lib.decodeEnvelope(t).ciphertext.length;
+    samples.decodeToken.push(performance.now() - t0);
+
+    // Encode then decode the result, which is exactly the pair of calls the
+    // sender made per chunk in 0.3.0: seal produced the token, toWire took it
+    // apart again.
+    t0 = performance.now();
+    for (const p of payloads) sink += lib.decodeEnvelope(lib.encodeEnvelope(p)).ciphertext.length;
+    samples.roundTripToken.push(performance.now() - t0);
+
+    if (HAS_ENVELOPE_BYTES) {
+      t0 = performance.now();
+      for (const p of payloads) sink += lib.encodeEnvelopeBytes(p).length;
+      samples.encodeBytes.push(performance.now() - t0);
+
+      t0 = performance.now();
+      for (const f of frames) sink += lib.decodeEnvelopeBytes(f).ciphertext.length;
+      samples.decodeBytes.push(performance.now() - t0);
+
+      t0 = performance.now();
+      for (const p of payloads) sink += lib.decodeEnvelopeBytes(lib.encodeEnvelopeBytes(p)).ciphertext.length;
+      samples.roundTripBytes.push(performance.now() - t0);
+    }
+  }
+
+  return { ...samples, sink, workload };
+}
+
+// ---------------------------------------------------------------------------
 // One run
 // ---------------------------------------------------------------------------
 
@@ -782,6 +969,7 @@ async function oneRun() {
   };
 
   out.rttMs = await measureRoundTrip(200);
+  out.repr = await measureRepresentation();
   return out;
 }
 
@@ -801,6 +989,10 @@ for (let i = 0; i < 20; i += 1) {
 }
 await measureTransfer({ size: 256 * 1024, name: 'warmup.bin' });
 await measureAead({ warm: true });
+// base64url has two implementations behind it on Node, the string path and the
+// Buffer path, and both are cold on the first envelope. Timing that would make
+// section 5 a compiler benchmark.
+await measureRepresentation({ reps: 3 });
 
 // ---------------------------------------------------------------------------
 // Report
@@ -1056,5 +1248,177 @@ console.table([
 console.log('   The only two rows that mean anything across those two columns are the byte');
 console.log('   counts and, loosely, the crypto time. Throughput is a property of the link.');
 console.log(
-  `   Same payload on the binary envelope wire: ${humanBytes(base.binaryWire)}, ${pct(((base.binaryWire - base.plainBytes) / base.plainBytes) * 100)} overhead, ${pct(((BASELINE_0_2_1.wireBytes - base.binaryWire) / BASELINE_0_2_1.wireBytes) * 100)} fewer bytes than 0.2.1${HAS_ENVELOPE_BYTES ? '.' : ' (derived, see the note at the top).'}\n`,
+  `   Same payload on the binary envelope wire: ${humanBytes(base.binaryWire)}, ${pct(((base.binaryWire - base.plainBytes) / base.plainBytes) * 100)} overhead, ${pct(((BASELINE_0_2_1.wireBytes - base.binaryWire) / BASELINE_0_2_1.wireBytes) * 100)} fewer bytes than 0.2.1${HAS_ENVELOPE_BYTES ? '.' : ' (derived, see the note at the top).'}`,
 );
+console.log('   A before and after over one link does exist, and it is not this table: the');
+console.log('   repository README, under "The same file over a real network", moves the same');
+console.log('   file on 0.2.1 and on 0.3.0 over the same relayed VPN, one run each. That pair');
+console.log('   is comparable to itself. It is still not comparable to the loopback column\n   above, which is why the change cell still says NOT COMPARABLE.\n');
+
+// --- 5. representation cost -------------------------------------------------
+
+const reprCheck = verifyRepresentationIdentity(runs[0].repr.workload);
+
+/**
+ * Every timed pass from every run, as one pooled sample, described by
+ * percentiles rather than by best and worst.
+ *
+ * The rest of this file spreads three run level medians, where best to worst is
+ * the right summary. Here there are 21 passes per run and the extremes are
+ * garbage collection: one pause during one of 63 passes says the machine has a
+ * collector, not that the codec is unstable. p10 to p90 is the honest middle
+ * and the max column keeps the tail visible instead of hiding it.
+ */
+function pooled(key) {
+  const xs = runs.flatMap((r) => r.repr[key]).filter((n) => Number.isFinite(n));
+  if (xs.length === 0) return { median: NaN, p10: NaN, p90: NaN, max: NaN, spread: NaN, n: 0 };
+  const s = [...xs].sort((a, b) => a - b);
+  const at = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+  const median = at(0.5);
+  const p10 = at(0.1);
+  const p90 = at(0.9);
+  return { median, p10, p90, max: s[s.length - 1], spread: ((p90 - p10) / median) * 100, n: s.length };
+}
+
+const encodeToken = pooled('encodeToken');
+const decodeToken = pooled('decodeToken');
+const roundTripToken = pooled('roundTripToken');
+const encodeBytes = pooled('encodeBytes');
+const decodeBytes = pooled('decodeBytes');
+const roundTripBytes = pooled('roundTripBytes');
+
+console.log('5. representation cost, token versus bytes');
+console.log(
+  `   ${REPR_CHUNKS} sealed chunks of ${CHUNK} B, one ${humanBytes(REPR_FILE_BYTES)} file's worth, encoded and`,
+);
+console.log(
+  `   decoded ${REPR_REPS} times per run across ${RUNS} run${RUNS === 1 ? '' : 's'}. Every number below is one pass over the`,
+);
+console.log('   whole workload, not one chunk, and it is measured on this machine.\n');
+
+if (HAS_ENVELOPE_BYTES) {
+  const ok =
+    reprCheck.tokenMatches === reprCheck.samples && reprCheck.frameMatches === reprCheck.samples;
+  console.log(
+    `   round trip is byte identical: token ${reprCheck.tokenMatches}/${reprCheck.samples}, frame ${reprCheck.frameMatches}/${reprCheck.samples} ${ok ? 'PASS' : 'FAIL'}`,
+  );
+  console.log(
+    '   Nothing on the socket changes when the base64 hop is removed. If that line ever',
+  );
+  console.log('   says FAIL, the saving was bought by changing the wire and the release is wrong.');
+} else {
+  console.log('   dist lacks encodeEnvelopeBytes, so only the token column below is real.');
+}
+if (reprCheck.firstFailure) console.log(`   FIRST FAILURE: ${reprCheck.firstFailure}`);
+console.log('');
+
+const reprRow = (operation, a, versus) => ({
+  operation,
+  ms: ms(a.median),
+  p10: ms(a.p10),
+  p90: ms(a.p90),
+  max: ms(a.max),
+  spread: Number.isFinite(a.spread) ? pct(a.spread) : 'n/a',
+  'us per chunk': ((a.median * 1000) / REPR_CHUNKS).toFixed(1),
+  'vs bytes': versus && Number.isFinite(versus.median) ? `${(a.median / versus.median).toFixed(1)}x` : '',
+});
+
+console.table(
+  [
+    reprRow('encode payload -> token', encodeToken, HAS_ENVELOPE_BYTES ? encodeBytes : null),
+    ...(HAS_ENVELOPE_BYTES ? [reprRow('encode payload -> bytes', encodeBytes, null)] : []),
+    reprRow('decode token -> payload', decodeToken, HAS_ENVELOPE_BYTES ? decodeBytes : null),
+    ...(HAS_ENVELOPE_BYTES ? [reprRow('decode bytes -> payload', decodeBytes, null)] : []),
+    reprRow('round trip via token', roundTripToken, HAS_ENVELOPE_BYTES ? roundTripBytes : null),
+    ...(HAS_ENVELOPE_BYTES ? [reprRow('round trip via bytes', roundTripBytes, null)] : []),
+  ],
+);
+console.log(
+  `   ${encodeToken.n} timed passes per row. Spread here is p10 to p90 over the median, not the best`,
+);
+console.log(
+  '   to worst used elsewhere in this file: at this sample count the extremes are garbage',
+);
+console.log('   collection pauses, so the max column carries the tail instead of the summary.\n');
+
+if (!HAS_ENVELOPE_BYTES) {
+  console.log('');
+} else {
+  const deleted = roundTripToken.median * CLI_BASE64_ROUND_TRIPS_PER_FRAME_0_3_0;
+  const survives = encodeBytes.median + decodeBytes.median;
+
+  console.log('   what the chunk path paid in 0.3.0 and stopped paying in 0.3.1\n');
+  console.table([
+    {
+      quantity: 'frames per transfer that carry a chunk',
+      value: String(REPR_CHUNKS),
+      where: 'sendPayload chunk loop',
+    },
+    {
+      quantity: 'token round trips per frame, 0.3.0',
+      value: String(CLI_BASE64_ROUND_TRIPS_PER_FRAME_0_3_0),
+      where: 'sealBytes + toWire, fromWire + openBytes',
+    },
+    {
+      quantity: 'token round trips per frame, 0.3.1',
+      value: '0',
+      where: 'sealToEnvelopeBytes, openFromEnvelopeBytes',
+    },
+    {
+      quantity: 'one token round trip, whole workload',
+      value: `${ms(roundTripToken.median)} ms`,
+      where: 'the table above',
+    },
+    {
+      quantity: `deleted per endpoint, ${humanBytes(REPR_FILE_BYTES)}`,
+      value: `${ms(roundTripToken.median)} ms`,
+      where: `1 round trip, that side's ${REPR_CHUNKS} chunks`,
+    },
+    {
+      quantity: `deleted per ${humanBytes(REPR_FILE_BYTES)} transfer`,
+      value: `${ms(deleted)} ms`,
+      where: `${CLI_BASE64_ROUND_TRIPS_PER_FRAME_0_3_0} round trips, both endpoints`,
+    },
+    {
+      quantity: 'byte codec, paid before and after',
+      value: `${ms(survives)} ms`,
+      where: 'the envelope still gets written out and read back',
+    },
+    {
+      quantity: 'sender crypto, same payload, section 4',
+      value: `${ms(baseCrypto)} ms`,
+      where: 'seal and open only, packaging excluded',
+    },
+    {
+      quantity: 'deleted as a share of that crypto',
+      value: pct((deleted / baseCrypto) * 100),
+      where: 'two endpoints over one, read as a shape not a ratio',
+    },
+  ]);
+
+  console.log(
+    '   Nothing is subtracted from the deleted row. The bytes native path still writes the',
+  );
+  console.log(
+    '   envelope out on the sender and reads it back in on the receiver, which is the byte',
+  );
+  console.log(
+    '   codec row, and toWire and fromWire paid exactly that before. The base64 round trip',
+  );
+  console.log('   on each side was pure detour and all of it went.');
+  console.log(
+    '   It counts chunk frames only. The invite, the accept, the ready frame, the header',
+  );
+  console.log(
+    '   and the acknowledgement still build a token, so the figure is a floor.',
+  );
+  console.log(
+    '   In 0.3.0 half of it appeared in the cryptoMs the CLI printed and half did not: the',
+  );
+  console.log(
+    '   base64 inside sealBytes and openBytes was timed, the identical base64 in toWire and',
+  );
+  console.log(
+    '   fromWire was not. In 0.3.1 the chunk path pays neither and what is left is inside.\n',
+  );
+}
