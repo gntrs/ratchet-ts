@@ -1,10 +1,10 @@
 import { x25519 } from '@noble/curves/ed25519.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 
-import type { MessagePayload, SessionState } from './contract.js';
+import type { EnvelopeBytes, MessagePayload, SessionState } from './contract.js';
 import { openAeadSync, sealAeadSync } from './aead.js';
 import { bytesToUtf8, equal, toBase64Url, utf8ToBytes, wipe } from './bytes.js';
-import { messageAad } from './envelope.js';
+import { decodeEnvelopeBytes, encodeEnvelopeBytes, messageAad } from './envelope.js';
 import { fail } from './errors.js';
 import { X25519_PUBLIC_LEN } from './identity.js';
 import { kdfChain, kdfRoot } from './kdf.js';
@@ -272,4 +272,76 @@ export function ratchetDecrypt(session: SessionState, payload: MessagePayload): 
   const text = bytesToUtf8(opened.plaintext);
   wipe(opened.plaintext);
   return { plaintext: text, session: opened.session };
+}
+
+// ---------------------------------------------------------------------------
+// Binary envelope representation
+// ---------------------------------------------------------------------------
+
+/**
+ * Seal plaintext bytes directly into a binary envelope.
+ *
+ * ON THE NAME, because this is the third thing in the package with "bytes" in
+ * it and the other two mean different layers. `ratchetEncryptBytes` says the
+ * PLAINTEXT is bytes, and it hands back a payload the caller still has to
+ * encode somehow. `encodeEnvelopeBytes` says the ENVELOPE is bytes, and it
+ * takes a payload that is already sealed. This function is both at once, so it
+ * spells the layer out: the plaintext side is inherited unchanged from
+ * `ratchetEncryptBytes`, and `ToEnvelopeBytes` names the representation coming
+ * out. Any shorter name has to drop one of the two words that keep those layers
+ * apart, and dropping either is exactly the confusion src/index.ts already
+ * warns about beside the `encodeEnvelopeBytes` re-export.
+ *
+ * There is no second state machine here. The chain step, the AAD, the AEAD call
+ * and the session advance are `ratchetEncryptBytes` called unchanged; the only
+ * thing this function decides is which of the two envelope encoders runs on the
+ * payload that comes out. So the token from `encodeEnvelope` and the bytes from
+ * here are one envelope in two spellings rather than two formats, and byte
+ * identity between the paths is a property of the encoders rather than an
+ * invariant this function has to maintain. test/ratchet-bytes-path.test.ts pins
+ * it anyway, because that is the promise 0.3.0 peers are relying on.
+ *
+ * It exists because the round trip it removes was pure waste. A caller on a
+ * binary transport used to base64 the envelope into a token and immediately
+ * decode it straight back into the bytes it already had, twice per chunk per
+ * direction, for nothing.
+ *
+ * The plaintext buffer belongs to the caller and is neither modified nor wiped.
+ */
+export function ratchetEncryptToEnvelopeBytes(
+  session: SessionState,
+  plaintext: Uint8Array,
+): { envelope: EnvelopeBytes; session: SessionState } {
+  const sealed = ratchetEncryptBytes(session, plaintext);
+  return { envelope: encodeEnvelopeBytes(sealed.payload), session: sealed.session };
+}
+
+/**
+ * Open a binary envelope to plaintext bytes. Mirror of the function above, and
+ * the same claim about there being one implementation: everything after the
+ * decode is `ratchetDecryptBytes`.
+ *
+ * Message envelopes only, for the reason `engine.openBytes` gives: invite and
+ * accept are protocol steps that produce a session rather than a payload, so a
+ * caller pulling file chunks off a socket has nothing sensible to do with one.
+ * Refusing here instead of widening the return type keeps that caller's happy
+ * path a single line.
+ *
+ * The reason is `malformed_token` so this agrees with `engine.openBytes` on
+ * what a misplaced handshake envelope means: a peer that sends one where a
+ * chunk belongs is not speaking the protocol, whichever encoding it used. The
+ * wording says envelope rather than token because no token existed on this path.
+ *
+ * The returned plaintext is a fresh allocation the caller owns, so wiping it
+ * after use is both safe and encouraged when the payload is secret.
+ */
+export function ratchetDecryptFromEnvelopeBytes(
+  session: SessionState,
+  envelope: EnvelopeBytes,
+): { plaintext: Uint8Array; session: SessionState } {
+  const payload = decodeEnvelopeBytes(envelope);
+  if (payload.kind !== 'message') {
+    fail('malformed_token', `expected a message envelope, got ${payload.kind}`);
+  }
+  return ratchetDecryptBytes(session, payload);
 }

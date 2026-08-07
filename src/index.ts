@@ -13,6 +13,7 @@
  */
 
 import type {
+  EnvelopeBytes,
   EnvelopeToken,
   Fingerprint,
   IdentityKeyPair,
@@ -27,7 +28,14 @@ import { decodeEnvelope, encodeEnvelope } from './envelope.js';
 import { fail } from './errors.js';
 import { acceptInvite, beginInvite, completeInvite } from './handshake.js';
 import { createIdentity, fingerprint, publicOf, sameIdentity } from './identity.js';
-import { ratchetDecrypt, ratchetDecryptBytes, ratchetEncrypt, ratchetEncryptBytes } from './ratchet.js';
+import {
+  ratchetDecrypt,
+  ratchetDecryptBytes,
+  ratchetDecryptFromEnvelopeBytes,
+  ratchetEncrypt,
+  ratchetEncryptBytes,
+  ratchetEncryptToEnvelopeBytes,
+} from './ratchet.js';
 
 async function engineCreateIdentity(): Promise<IdentityKeyPair> {
   return createIdentity();
@@ -79,6 +87,30 @@ async function engineOpenBytes(
     fail('malformed_token', `expected a message token, got ${payload.kind}`);
   }
   return ratchetDecryptBytes(session, payload);
+}
+
+/**
+ * Envelope-bytes counterpart of `sealBytes`, for callers whose transport is
+ * already binary. `sealBytes` hands back a pasteable token, which such a caller
+ * then has to un-base64 straight back into the bytes it already had; this skips
+ * that and emits the identical frame directly.
+ */
+async function engineSealToEnvelopeBytes(
+  session: SessionState,
+  plaintext: Uint8Array,
+): Promise<{ envelope: EnvelopeBytes; session: SessionState }> {
+  return ratchetEncryptToEnvelopeBytes(session, plaintext);
+}
+
+/**
+ * Envelope-bytes counterpart of `openBytes`, message envelopes only, for the
+ * same reason `openBytes` gives.
+ */
+async function engineOpenFromEnvelopeBytes(
+  session: SessionState,
+  envelope: EnvelopeBytes,
+): Promise<{ plaintext: Uint8Array; session: SessionState }> {
+  return ratchetDecryptFromEnvelopeBytes(session, envelope);
 }
 
 /**
@@ -140,6 +172,8 @@ export const engine: MessagingEngine = {
   sealBytes: engineSealBytes,
   open: engineOpen,
   openBytes: engineOpenBytes,
+  sealToEnvelopeBytes: engineSealToEnvelopeBytes,
+  openFromEnvelopeBytes: engineOpenFromEnvelopeBytes,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,13 +220,33 @@ export { ENVELOPE_VERSION, decodeEnvelope, encodeEnvelope } from './envelope.js'
 /**
  * Binary envelope codec, additive in 0.3.0.
  *
- * Deliberately not folded into `engine`: `engine.sealBytes` is about the
- * PLAINTEXT being bytes and still hands back a pasteable token, while these two
- * are about the ENVELOPE being bytes. Same layer confusion would be guaranteed
- * if both lived on one object under similar names.
+ * Deliberately not folded into `engine`: these two do no crypto, they only
+ * rewrite an already-sealed payload from one spelling into another. Everything
+ * on `engine` advances a ratchet.
  *
- * Reach for these when the transport is already binary. Keep `encodeEnvelope`
- * when the transport is a human.
+ * THREE NAMES WITH "BYTES" IN THEM, AND WHICH LAYER EACH ONE MEANS. The word is
+ * doing different work in each, and a caller who reads it as one word will pick
+ * the wrong one, so the map is here rather than left to be inferred:
+ *
+ *   engine.sealBytes           the PLAINTEXT is bytes. Out comes a token, i.e.
+ *                              base64url text, because the caller is going to
+ *                              paste it or log it.
+ *   encodeEnvelopeBytes        the ENVELOPE is bytes. In goes a payload that is
+ *                              already sealed; no key is touched.
+ *   engine.sealToEnvelopeBytes both at once, which is why it is the only one of
+ *                              the three that has to say both. Plaintext bytes
+ *                              in, envelope bytes out, no token in between.
+ *
+ * The third exists because composing the first two was the common case and the
+ * composition was absurd: a caller on a binary transport base64ed the envelope
+ * into a token and immediately decoded it straight back into the bytes it
+ * already had. `openFromEnvelopeBytes` is the same story inbound.
+ *
+ * Rule of thumb for picking one. If the transport is a human, `seal` or
+ * `sealBytes` and keep the token. If the transport is a socket or a file,
+ * `sealToEnvelopeBytes` and never build a token at all. Reach for the codec
+ * directly only when you have a payload from somewhere else and want the other
+ * spelling of it.
  */
 export { decodeEnvelopeBytes, encodeEnvelopeBytes } from './envelope.js';
 /**

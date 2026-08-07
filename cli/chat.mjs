@@ -125,8 +125,8 @@ async function expectFrame(channel, what) {
  * A raw reason code is useless to someone staring at a terminal, but the full
  * translation table lives in cli/protocol.mjs and is not exported. Rather than
  * fork a second copy that can drift out of step, surface the library's own
- * sentence and the machine reason next to it. See HANDOFF-chat.md: exporting
- * wrapCrypto from protocol.mjs would let this be deleted.
+ * sentence and the machine reason next to it. Exporting wrapCrypto from
+ * cli/protocol.mjs would let this function be deleted outright.
  */
 function explain(err, during) {
   if (isCryptoFailure(err)) return `${during}: ${err.message} (${err.reason})`;
@@ -160,7 +160,8 @@ function compareBytes(a, b) {
  * Copied from cli/protocol.mjs, which does not export it. The two copies MUST
  * stay byte identical or a user comparing a chat against a transfer sees two
  * different sets of words for one pair of identities and concludes, wrongly,
- * that something is wrong. See HANDOFF-chat.md for the requested export.
+ * that something is wrong. Exporting it from cli/protocol.mjs would remove the
+ * duplication and the risk with it.
  *
  * peerWords alone cannot do this job: a fingerprint of the peer identity is
  * different on each side by construction. Hashing both identities in a

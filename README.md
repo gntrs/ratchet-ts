@@ -171,8 +171,10 @@ something else, and `ratchet id` to see this machine's own words.
 ### A real transfer, end to end
 
 A 763.5 kB file moved between two `ratchet` processes over loopback on one
-machine, 0.3.0, Ryzen 5 7530U, Node 25, Windows 11. Both `--stats` tables, side
-by side:
+machine, 0.3.1, Ryzen 5 7530U, Node 25.8.0, Windows 11, native AEAD. Every time
+row is the median of twenty one transfers after four warmup runs, with the full
+observed range beside it, because a single `--stats` run on a laptop can land
+several milliseconds either side of the truth:
 
 | | sender | receiver |
 |---|---|---|
@@ -180,24 +182,84 @@ by side:
 | on the wire | 765.3 kB | 765.3 kB |
 | overhead | 1.8 kB (0.2%) | 1.8 kB (0.2%) |
 | chunks | 12 x 65.5 kB | 12 x 65.5 kB |
-| handshake | 48 ms | 37 ms |
-| crypto | 49 ms | 53 ms |
+| handshake | 45.8 ms | 36.6 ms |
+| crypto | 31.5 ms [29.9 to 34.4] | 28.3 ms [27.2 to 32.9] |
 | AEAD backend | native | native |
-| wall time | 62 ms | 70 ms |
-| throughput | 12.23 MB/s | 10.98 MB/s |
-| SHA-256 | `fdd05cad23edb796` | `fdd05cad23edb796` |
+| wall time | 18.7 ms [16.7 to 20.8] | 22.5 ms [21.4 to 24.4] |
+| throughput | 40.9 MB/s [36.8 to 45.7] | 33.9 MB/s [31.2 to 35.7] |
+| SHA-256 | `017f13ff832177f8` | `017f13ff832177f8` |
 
 The hashes match, so the bytes that landed are the bytes that left. Loopback
-means the transport row is close to free, which is the point of showing it: at
-12 MB/s with 49 ms of crypto in a 62 ms wall time, this library is now the thing
-you are waiting for, not the wire. On a real network the wall time is the
-network's and the crypto row barely moves.
+means the transport row is close to free, which is the point of showing it: the
+wall time is what this library costs with the network taken away.
 
-That table is one run. Five repeats of the same transfer on the same machine put
-the sender between 12.3 and 14.0 MB/s, median 13.1, and the receiver between
-11.7 and 13.3 MB/s, median 11.8, with the crypto row between 46 and 53 ms. The
-byte rows are exact and repeat to the byte. Read the wall time and throughput
-rows as plus or minus 10%.
+The `crypto` row is larger than the `wall time` row and that is not a mistake.
+`crypto` counts every seal and every open this side performed, the two handshake
+opens included, and the handshake happens before the clock that produces
+`wall time` starts. `wall time` runs from the first payload frame to the final
+acknowledgement.
+
+0.3.0 shipped the same transfer on the same machine at roughly a third of that
+speed:
+
+| | 0.3.0 | 0.3.1 | |
+|---|---|---|---|
+| sender wall time | 56.45 ms | 18.65 ms | 3.03x |
+| sender throughput | 13.53 MB/s | 40.94 MB/s | 3.03x |
+| sender crypto | 47.33 ms | 31.47 ms | 1.50x |
+| receiver wall time | 60.84 ms | 22.52 ms | 2.70x |
+| receiver throughput | 12.55 MB/s | 33.90 MB/s | 2.70x |
+| receiver crypto | 47.96 ms | 28.32 ms | 1.69x |
+| handshake, sender | 45.79 ms | 45.80 ms | unchanged |
+| on the wire | 765,286 B | 765,286 B | identical |
+
+Those are medians of twenty one runs per version, forty two transfers, the two
+versions interleaved run by run so that a warm or a throttled machine cannot
+favour one column. Every SHA-256 matched and `on the wire` was identical to the
+byte on all forty two. The handshake row is in the table on purpose: it did not
+move, which is the control that says the win is on the payload path and nowhere
+else.
+
+Read the two `crypto` cells as a change of both cost and scope, not cost alone.
+0.3.0 counted the base64 inside `sealBytes` and `openBytes` and did not count
+the identical base64 in the CLI's own frame conversion; 0.3.1 counts everything
+on the payload path. So the 47 ms column was already an undercount of its own
+version, and the true 0.3.0 to 0.3.1 CPU saving is larger than the 1.50x and
+1.69x those cells suggest. The `wall time` row is the honest one, because it is
+a stopwatch and measures the same thing in both columns.
+
+Nothing about the encryption or the wire format changed between those two
+columns. What
+changed is that 0.3.0 was base64ing every frame into an `OCX1.` token and
+base64ing it straight back out again before it hit the socket, twice per
+transfer, because the byte oriented parts of the engine spoke tokens at both
+ends. 0.3.1 seals plaintext bytes directly to envelope bytes and opens them the
+same way, so the token is never built. See
+[the same base64, the other half](#the-same-base64-the-other-half).
+
+Read the byte rows as exact and the time rows as plus or minus 10%.
+
+**Both ends have to be 0.3.1 before you see that.** Loopback wall time is coupled
+across the socket: each side spends part of its clock blocked on the other side
+doing base64, so upgrading one endpoint pays you back somewhere between a fifth
+and a third of the win. Same machine, same file, medians of eleven transfers per
+pairing:
+
+| sender | receiver | sender wall | receiver wall |
+|---|---|---|---|
+| 0.3.0 | 0.3.0 | 56.91 ms | 62.85 ms |
+| 0.3.1 | 0.3.0 | 49.86 ms | 54.17 ms |
+| 0.3.0 | 0.3.1 | 44.83 ms | 50.26 ms |
+| 0.3.1 | 0.3.1 | 18.75 ms | 22.74 ms |
+
+The two mixed rows are also the interoperability proof: 0.3.1 was checked
+against the published 0.3.0 npm tarball, not against a working copy, and both
+directions moved the file with a matching SHA-256 and `wireBytes` of exactly
+765,286 on every run. The two halves do not add up to the whole: 7.05 ms and
+12.08 ms of sender wall time from the two single-ended upgrades, against 38.16 ms
+when both ends move. That is expected rather than surprising. Work removed from
+one process shortens the other process's blocking reads as well as its own, so
+the second upgrade is worth more than the first.
 
 The `on the wire` row counts the frames that carry the file, the sealed header
 and the twelve chunks. It does not count the handshake. A relay counting every
@@ -222,7 +284,7 @@ Overhead               395 B (1975.0%)
 Chunks              1 x 65.5 kB
 ```
 
-395 bytes to carry 20, down from 546 on 0.2.1. The floor is the envelope: a 24
+395 bytes to carry 20, down from 544 on 0.2.1. The floor is the envelope: a 24
 byte nonce, a 16 byte Poly1305 tag, a 32 byte ratchet public key, plus the length
 prefixes and the sealed header that carries the filename. It is exact, not
 approximate, but it moves with the name: `--text` sends `message.txt` and pays
@@ -231,9 +293,11 @@ characters of filename, two bytes.
 
 The protocol part of that floor is the same in 0.2.1 and 0.3.0. The wire cost is
 not, because 0.2.1 base64url'd the envelope along with everything else, which is
-why the same 20 byte message cost 546 bytes of overhead there. It is also why the
-interesting numbers here are file sized: a chat line will always be mostly
-envelope.
+why the same 20 byte message cost 544 bytes of overhead there. Both of those
+figures are live counts: the same 20 byte `--text` send run against the published
+0.2.1 tarball and against this tree, bytes counted by a relay sitting between the
+two processes, not modelled from the token length. It is also why the interesting
+numbers here are file sized: a chat line will always be mostly envelope.
 
 ### The same file over a real network
 
@@ -249,7 +313,7 @@ Both versions were run over that same link, with the same file, minutes apart.
 | | 0.2.1 | 0.3.0 | delta |
 |---|---|---|---|
 | plaintext | 763.5 kB | 763.5 kB | |
-| on the wire | 1.0 MB | 765.3 kB | 254.8 kB fewer, 25.0% |
+| on the wire | 1.0 MB | 765.3 kB | 255.2 kB fewer, 25.0% |
 | overhead | 257.0 kB (33.7%) | 1.8 kB (0.2%) | the base64 is gone |
 | chunks | 12 x 65.5 kB | 12 x 65.5 kB | |
 | handshake | 115 ms | 127 ms | round trip noise |
@@ -261,10 +325,14 @@ Both versions were run over that same link, with the same file, minutes apart.
 The hash matched on both sides both times, so this is the same file arriving
 intact, not a faster route to a different answer.
 
-Read that table honestly. The byte rows are exact: 1,020,096 bytes against
-765,288, counted the same way on both versions. The time rows are one run each
-on a relayed link, so 16.5% is the right order of magnitude and not a precise
-figure. The handshake row moving the wrong way is round trip variance, not a
+Read that table honestly. The byte rows are exact: 1,020,453 bytes against
+765,288, counted the same way on both versions, and reproduced since against the
+published 0.2.1 and 0.3.0 tarballs on the loopback harness, which agrees to the
+byte. The time rows are one run each on a relayed link, so 16.5% is the right
+order of magnitude and not a precise figure. 0.3.1 has not been run over this
+link at all, and its row is absent rather than guessed: it changes CPU only, so
+on a 3 MB/s relay it would move the `crypto` row and very little else. The
+handshake row moving the wrong way is round trip variance, not a
 regression, and it is why the throughput gain (19.3%) is smaller than the byte
 saving (25.0%): the handshake is a fixed round trip cost that no amount of wire
 efficiency touches.
@@ -340,6 +408,34 @@ over the byte path: a `seal` token opens under `openBytes` as its exact UTF-8
 encoding, and a `sealBytes` token that happens to be valid UTF-8 opens under
 `open`. One token carries at most 65519 bytes of plaintext; chunk anything
 bigger yourself.
+
+If your transport is already binary, skip the token entirely.
+`engine.sealToEnvelopeBytes` and `engine.openFromEnvelopeBytes`, new in 0.3.1,
+take plaintext bytes to envelope bytes and back with no base64 in between. They
+are shortcuts, not a second format: for the same session state and the same
+random draw they produce exactly the bytes you would get from `sealBytes`
+followed by `encodeEnvelopeBytes(decodeEnvelope(token))`, checked byte for byte
+at twelve plaintext lengths from 0 to 65519 with the RNG pinned. Do not expect
+two live seals of the same plaintext to match: every message draws a fresh 24
+byte nonce, so they differ the way any two seals differ. Either side of a
+conversation can use either path in any order.
+
+```ts
+const sent = await engine.sealToEnvelopeBytes(aliceSession, bytes);
+aliceSession = sent.session;
+
+socket.write(sent.envelope); // a Uint8Array, no base64 anywhere
+
+const got = await engine.openFromEnvelopeBytes(bobSession, sent.envelope);
+assert.deepEqual(got.plaintext, bytes);
+bobSession = got.session;
+```
+
+Message envelopes only, same as `openBytes`. Hand an invite or an accept to
+`openFromEnvelopeBytes` and it fails closed with `malformed_token` rather than
+guessing. Handshake envelopes go through `engine.open`, which owns that state
+machine. The CLI does exactly this: chunks on the bytes path, handshake on the
+token path.
 
 Want to watch it work first? Clone the repo and run `node examples/demo.mjs` for
 a full handshake, a message each way, and a tamper that fails closed. The
@@ -490,6 +586,13 @@ shipped with. The other 0.3 is the envelope itself and is still being paid. The
 CLI now sends bytes and the number is 0.2%. The token API is untouched, because
 for the paste-anywhere case the text encoding is the whole point.
 
+Three names sit close together here and mean different things. `sealBytes` is
+about the plaintext being bytes, and it still returns a token. `encodeEnvelopeBytes`
+is about the envelope being bytes, and it does no crypto at all. `sealToEnvelopeBytes`,
+new in 0.3.1, is both ends at once: plaintext bytes in, envelope bytes out, no
+token built in between. That last one is what deleted the CPU cost described in
+[the same base64, the other half](#the-same-base64-the-other-half).
+
 The framing changed with it. `cli/frame.mjs` was newline delimited text and is
 now `[u32 big endian length][payload]`, capped at 8 MiB.
 
@@ -615,7 +718,7 @@ a wrong error is a failing test.
 
 Plus envelope round-trips across all three token kinds, deterministic
 fingerprints, out-of-order delivery across ratchet turns, and identity-mismatch
-handling. 89 tests, `.ts` and `.mjs`.
+handling. 112 tests, `.ts` and `.mjs`.
 
 ```sh
 npm install && npm test && npm run typecheck && npm run build
@@ -694,8 +797,9 @@ npm run bench:wire
 A second harness, separate from `npm run bench`. It stands the real
 `cli/frame.mjs` server up on loopback with a byte-counting relay in front of it,
 pushes real transfers through, and reports what the socket actually carried
-rather than what the arithmetic predicts. Ryzen 5 7530U, Node 25, Windows 11,
-median of 3 runs.
+rather than what the arithmetic predicts. Ryzen 5 7530U, Node 25.8.0, Windows
+11, `--runs 5`. The byte rows below are deterministic and repeated exactly on
+every run; the millisecond rows are medians and move by a third between runs.
 
 **Bytes on the wire.** Same payload, 0.2.1 base64url token plus newline against
 the 0.3.0 binary envelope plus u32 length prefix:
@@ -720,32 +824,43 @@ reported. MB/s, higher is better:
 
 | op | `@noble/ciphers` | `src/aead.ts` (native) | ratio |
 |---|---|---|---|
-| seal 256 B | 26.7 | 28.8 | 1.08x |
-| open 256 B | 24.4 | 29.3 | 1.20x |
-| seal 65519 B | 154.6 | 599.9 | 3.88x |
-| open 65519 B | 150.3 | 761.1 | 5.06x |
+| seal 256 B | 20.7 | 26.2 | 1.27x |
+| open 256 B | 19.4 | 26.3 | 1.35x |
+| seal 65519 B | 140.9 | 581.9 | 4.13x |
+| open 65519 B | 137.1 | 895.9 | 6.53x |
 
+Ryzen 5 7530U, Node 25.8.0, Windows 11, `npm run bench:wire --runs 5`, medians.
 Small messages are dominated by call overhead and the native path buys almost
-nothing. At chunk size it is 4x to 5x, which is the case the CLI is in.
+nothing. At chunk size it is worth several times, which is the case the CLI is
+in.
 
-Those cells are one run and they move. Nine repeats that alternate the two
-backends inside each repeat, so neither one gets the cold cache or the boost
-clock to itself, put the chunk sized ratios at 4.8x seal and 5.7x open at the
-median, and the worst repeat of the nine still read 3.9x seal and 4.7x open. The
-256 B ratios wandered between 1.03x and 1.36x, which is a longer way of saying
-there is nothing there.
+Those cells are one run and they move a lot, so read the ratio column and ignore
+the third digit of the MB/s. Six captures on this laptop put the chunk sized
+seal ratio between 3.9x and 4.8x and the chunk sized open ratio between 3.4x and
+6.5x, including nine repeats that alternate the two backends inside each repeat
+so neither gets the cold cache or the boost clock to itself. Somewhere between 3x
+and 7x is the honest statement, and the 6.53x above is the top of that range
+rather than the middle of it. The 256 B ratios wandered between 1.03x and 1.37x,
+which is a longer way of saying there is nothing there.
 
 **Handshake, split.** 3 one-way flights, so 1.5 round trips before a payload byte
 moves:
 
 | side | wall | crypto | transport | crypto share |
 |---|---|---|---|---|
-| sender | 14.66 ms | 7.66 ms | 7.00 ms | 52.3% |
-| receiver | 10.84 ms | 5.56 ms | 5.28 ms | 51.3% |
+| sender | 13.98 ms | 7.69 ms | 6.29 ms | 55.0% |
+| receiver | 10.54 ms | 5.49 ms | 5.05 ms | 52.1% |
 
-Run to run spread on those cells is about a third, so read them as ten to fifteen
-milliseconds, not as four significant figures. Loopback round trip on this
-machine is 0.08 ms, so the transport column above is almost entirely process
+Same run as the AEAD table above. Run to run spread on those cells is about a
+third, so read them as ten to fifteen milliseconds, not as four significant
+figures. This is a smaller number than the
+`handshake` row in the end to end table near the top of this file, which reads
+45.8 ms sender and 36.6 ms receiver on the same laptop, and both are right: this
+harness times the three flights inside one process, while the CLI's `handshakeMs`
+starts when the receiver begins minting an invite and stops when the sender has
+opened the accept, so it also carries the second process getting to the point of
+having read the invite at all. Loopback round trip on this machine is 0.06 ms
+over 200 probes, so the transport column above is almost entirely process
 scheduling, not network. Substitute your own link: at 40 ms RTT the same
 handshake costs about 60 ms of transport and the crypto column does not move.
 
@@ -759,14 +874,87 @@ socket where nothing was ever going to be pasted anywhere. 0.3.0 stops paying it
 on the CLI path and keeps paying it in the token API, where being text is the
 entire feature.
 
+### The same base64, the other half
+
+0.3.0 took base64 off the socket. It did not take base64 off the CPU. The two
+byte oriented engine calls, `sealBytes` and `openBytes`, still spoke tokens:
+`sealBytes` handed back an `OCX1.` string, and the CLI immediately parsed that
+string back into the bytes it had just been made from. Inbound ran the same trick
+backwards. So every frame was base64 encoded and base64 decoded once on its way
+out and once again on its way in, purely to cross a seam inside one process. None
+of it ever reached a socket. `npm run bench:wire` section 5 measures that seam
+directly, twelve chunks of 65519 bytes, in process, no socket involved. Every row
+is one pass over all twelve chunks. Ryzen 5 7530U, Node 25.8.0, Windows 11,
+native AEAD, median of 105 timed passes, `--runs 5`:
+
+| operation | ms | vs bytes |
+|---|---|---|
+| encode to token | 9.42 | 18.0x |
+| encode to bytes | 0.52 | |
+| decode from token | 16.29 | 46.3x |
+| decode from bytes | 0.35 | |
+| one round trip, token | 26.44 | 25.3x |
+| one round trip, bytes | 1.04 | |
+
+Treat that table as one draw, not a constant. Four independent captures on this
+machine, three from this harness and one from a separate one written to check it,
+put the round trip at 24.4, 25.7, 26.4 and 27.7 ms. Read it as a 24 to 28 ms
+band. The split between the two halves is softer than the total: draws ranged
+from 7.7 to 10.3 ms on the encode side and 14.2 to 16.9 on the decode side, so
+which half of a base64 round trip looks expensive depends on where the garbage
+collector lands. The total moves much less.
+
+One round trip is what a single endpoint paid: the sender encoded to a token
+inside `sealBytes` and decoded straight back out in `toWire`, and the receiver
+did the mirror image. Two round trips existed per transfer because a transfer has
+two endpoints, so about 53 ms is the cost across the pair on this draw and about
+26 ms is the cost you can delete from either one on its own. 0.3.1 adds
+`engine.sealToEnvelopeBytes` and `engine.openFromEnvelopeBytes`, which take
+plaintext bytes to envelope bytes and back without the string in the middle, and
+points the CLI's file path at them.
+
+The measured saving is larger than that per endpoint, not smaller: 37.8 ms of
+sender wall time and 38.3 ms of receiver wall time, against a 24 to 28 ms band of
+its own base64 that each side stops paying. The extra comes from the other end of
+the socket. Both processes are on the same twelve cores and the sender blocks on
+a receiver that is now cheaper to feed, so an upgrade helps whichever side you
+measure. Upgrading the receiver alone takes 12.1 ms off sender wall time and
+upgrading the sender alone takes 7.1 ms off it, while upgrading both takes 38.2
+ms off, which is far more than those two added together. On a real link, where
+the transport rather than the peer's CPU is what the sender waits for, expect the
+per endpoint figure and not this one.
+
+The chunk frames are the only ones that moved. The five small frames, the invite,
+the accept, the ready signal, the sealed header and the acknowledgement, still
+build tokens, because `engine.open` owns the handshake state machine and it
+speaks tokens. Twelve frames out of seventeen is where the bytes are.
+
+Together the two releases are one argument, not two optimisations. 0.2.1 paid
+base64 on the wire and on the CPU. 0.3.0 stopped paying it on the wire, which is
+where it was visible. 0.3.1 stops paying it on the CPU, which is where the rest
+of it was hiding. The token API is untouched by both: `engine.seal` still returns
+`OCX1.<kind>.<base64url>`, byte for byte what 0.1.0 returned, because a thing you
+paste into a chat window has to be text.
+
+Nothing on the wire moved in 0.3.1. A deterministic capture of all seventeen
+frames of this transfer, with every source of randomness seeded so both versions
+draw identical keys and nonces, is byte identical between 0.3.0 and 0.3.1. The
+two versions interoperate in both directions.
+
 One caveat on the throughput numbers in this README. Everything except
 [the real network table](#the-same-file-over-a-real-network) is loopback, so
 those MB/s figures are what the library can do with the transport taken away,
-not what a transfer will feel like. The one honest speed comparison is that
-table, where both versions moved the same file over the same relayed link:
-16.5% faster wall time, 19.3% more throughput, 25.0% fewer bytes. `bench/wire.mjs`
-still prints `NOT COMPARABLE` in its own speedup cell, because its hard coded
-0.2.1 baseline came off a different link than the machine running the script.
+not what a transfer will feel like. That matters more in 0.3.1 than it did in
+0.3.0: the work this release deletes is CPU, so on loopback it shows up almost
+undiminished as wall time, while on a slow link it hides behind the network and
+you will see much less of it. The 40.9 MB/s in the table at the top is a
+ceiling, not a promise, and 45.7 MB/s is the best single transfer out of twenty
+one. The one honest speed comparison is the real network
+table, where 0.2.1 and 0.3.0 moved the same file over the same relayed link:
+16.5% faster wall time, 19.3% more throughput, 25.0% fewer bytes. 0.3.1 has not
+been run over that link, so it has no row there. `bench/wire.mjs` still prints
+`NOT COMPARABLE` in its own speedup cell, because its hard coded 0.2.1 baseline
+came off a different link than the machine running the script.
 
 ## License
 

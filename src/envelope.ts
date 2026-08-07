@@ -84,7 +84,15 @@ class Reader {
     if (this.at + len > this.buf.length) fail('malformed_token', 'length prefix overruns the payload');
     // Copy rather than subarray: callers keep these around inside session state
     // and must not share a backing buffer with the decoded token.
-    const out = this.buf.slice(this.at, this.at + len);
+    //
+    // Constructing a fresh Uint8Array rather than calling `this.buf.slice()`,
+    // because slice only copies for a plain Uint8Array. Node's Buffer inherits
+    // from Uint8Array but overrides slice as a deprecated alias of subarray,
+    // which shares memory. A Buffer is exactly what a socket hands the CLI on
+    // every frame, so the one input shape this guarantee mattered most for was
+    // the one shape that silently did not get it. This also normalises the
+    // output: a decoded field is a Uint8Array whatever the caller passed in.
+    const out = new Uint8Array(this.buf.subarray(this.at, this.at + len));
     this.at += len;
     return out;
   }
@@ -225,6 +233,15 @@ export function encodeEnvelopeBytes(payload: EnvelopePayload): Uint8Array {
 }
 
 export function decodeEnvelopeBytes(bytes: Uint8Array): EnvelopePayload {
+  // TypeScript says this is a Uint8Array. JavaScript callers, and anything that
+  // reached here through a JSON round trip or an await that resolved to
+  // undefined, say otherwise. Without this line `null` and `undefined` escape
+  // as a raw TypeError from `.length`, which breaks the one promise this
+  // module makes: every bad input comes back as a CryptoFailureError carrying a
+  // reason. Buffer passes, because Buffer extends Uint8Array.
+  if (!(bytes instanceof Uint8Array)) {
+    fail('malformed_token', `binary envelope must be a Uint8Array, received ${bytes === null ? 'null' : typeof bytes}`);
+  }
   if (bytes.length < 2) fail('malformed_token', 'binary envelope is shorter than its two byte header');
   // Version before kind, same order as the string form, so a future OCX2 byte
   // stream reports "update your client" rather than "unknown kind".

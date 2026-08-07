@@ -5,6 +5,116 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-07
+
+Nothing on the wire moved. This release deletes base64 that was never on the
+wire in the first place: 0.3.0 encoded every frame into an `OCX1.` token and
+decoded it straight back out again, twice per transfer, purely because the
+engine's byte oriented surface spoke tokens at both ends. The bytes on the
+socket are identical to 0.3.0, byte for byte, proven by a deterministic capture
+of all 17 frames of a 763.5 kB transfer under a seeded RNG. A 0.3.0 peer and a
+0.3.1 peer interoperate in both directions.
+
+### Added
+
+- `engine.sealToEnvelopeBytes(session, plaintext)` and
+  `engine.openFromEnvelopeBytes(session, envelope)`: plaintext bytes in,
+  envelope bytes out, and back. These are the third and fourth members of a
+  family whose names are easy to confuse, so `src/index.ts` now carries a map:
+  `sealBytes` is about the plaintext being bytes and still returns a token,
+  `encodeEnvelopeBytes` is a pure codec that does no crypto, and the two new
+  ones are the full ratchet step with binary at both ends. Nothing was renamed
+  and nothing was removed.
+  Those two engine methods are the whole of the new public surface. The package
+  exports the same 24 names it did in 0.3.0, in ESM and in CommonJS, plus these
+  two methods on the existing `engine` object. `src/ratchet.ts` gained a
+  matching `ratchetEncryptToEnvelopeBytes` / `ratchetDecryptFromEnvelopeBytes`
+  pair one layer down, but those are internal and are deliberately not exported,
+  because two more top level names in a family this easy to confuse buys nothing
+  a caller cannot get from `engine`.
+- A fifth section in `npm run bench:wire`, "representation cost, token versus
+  bytes", which measures the six conversions side by side and checks byte
+  identity before it reports a single timing.
+
+### Performance
+
+- The CLI no longer builds a token for the frames that carry the file. On a
+  763.5 kB transfer over loopback, 12 chunks of 65519 B, native AEAD, Ryzen 5
+  7530U, Node v25.8.0, Windows 11. Medians of 21 transfers per version after 4
+  warmup runs, the two versions interleaved run by run so neither one gets the
+  cold laptop or the boost clock to itself, full observed range in brackets:
+
+  | side | 0.3.0 | 0.3.1 | ratio |
+  | --- | --- | --- | --- |
+  | sender wall | 56.45 ms [53.2 to 88.5] | 18.65 ms [16.7 to 20.8] | 3.03x |
+  | sender throughput | 13.53 MB/s | 40.94 MB/s | 3.03x |
+  | receiver wall | 60.84 ms [56.6 to 93.1] | 22.52 ms [21.4 to 24.4] | 2.70x |
+  | receiver throughput | 12.55 MB/s | 33.90 MB/s | 2.70x |
+
+  Wall time fell 3.0x on the sender and 2.7x on the receiver. `wireBytes` was
+  765286 on all 42 runs and every SHA-256 matched. Both ends have to be 0.3.1:
+  with one end still on 0.3.0 the same harness reads about 45 to 50 ms of
+  sender wall, because on loopback each side spends part of its wall time
+  waiting for the other one's CPU.
+- The isolated cost, measured by section 5 of the wire bench on the same 12
+  chunks: encoding to a token 9.42 ms against 0.52 ms to bytes (18.0x),
+  decoding a token 16.29 ms against 0.35 ms from bytes (46.3x). One round trip
+  is 26.44 ms of token against 1.04 ms of bytes. That is per endpoint, and a
+  transfer has two, so 52.87 ms across the pair. Four captures of that bench put
+  the token round trip at 24.4, 25.7, 26.4 and 27.7 ms, so treat it as a 24 to
+  28 ms band per side and not a constant. The end to end saving is larger than the
+  band, 37.8 ms of sender wall and 38.3 ms of receiver wall, because on loopback
+  deleting CPU on one side also shortens the other side's wait.
+
+### Changed
+
+- `cryptoMs` in `--stats` and `--json` now counts every conversion the payload
+  path performs, not some of them. In 0.3.0 the number was quietly wrong in two
+  directions at once: the base64 inside `sealBytes` and `openBytes` was counted,
+  the base64 in the CLI's own `toWire` and `fromWire` was excluded by a doc
+  comment that called the exclusion deliberate. It counted one pass and hid the
+  other. Nothing on the payload path is hidden now, and the doc comment in
+  `cli/protocol.mjs` says so. The measured effect is that `cryptoMs` falls from
+  47.33 ms to 31.47 ms on the sender and 47.96 ms to 28.32 ms on the receiver,
+  medians of the same 21 runs, because deleting two base64 passes outweighs
+  starting to count what remains. `cryptoMs` still includes the handshake opens,
+  which is why it can exceed `wallMs`: `wallMs` starts at the first payload
+  frame.
+- The three small payload frames, the ready signal, the sealed header and the
+  final acknowledgement, still build a token, and so do the invite and the
+  accept. A token has to exist there: `engine.open` runs the handshake state
+  machine and takes a token, and the invite is a thing a human pastes. The three
+  payload ones are converted inside `cryptoMs`. The invite and the accept are
+  converted outside it, on purpose, because both fall inside the window
+  `handshakeMs` already reports end to end; that pair of conversions measures
+  about 0.03 ms, so nothing meaningful is sitting outside either clock.
+- A corrupt chunk now reports as `opening chunk 3 of 12` where 0.3.0 said
+  `decoding chunk 3 of 12`. Same failure, same exit code, one word of the
+  message moved, because the decode step it was named after no longer exists.
+
+### Fixed
+
+- Decoding no longer aliases a `Buffer` the caller passed in. The codec has
+  always intended to copy each field out of the input, and the comment saying so
+  has been there since the binary envelope landed, but the implementation called
+  `.slice()` on the input. That copies for a plain `Uint8Array` and does not
+  copy for a `Buffer`, which overrides `slice` as a deprecated alias of
+  `subarray` and shares memory. A `Buffer` is exactly what a socket hands the
+  CLI on every frame, so the shape the guarantee mattered most for was the one
+  shape that never got it. A caller that pooled or reused its read buffer would
+  have watched decoded fields, including a ciphertext already sitting in session
+  state, change underneath it. The existing regression test only passed a
+  `Uint8Array`, which is why it stayed green. Both shapes are tested now.
+- Decoded fields are always a plain `Uint8Array`. They used to inherit the
+  prototype of whatever was passed in, so feeding a `Buffer` produced `Buffer`
+  typed fields, which contradicted the declared return type.
+- `decodeEnvelopeBytes` rejects a non `Uint8Array` argument as
+  `malformed_token` instead of escaping a raw `TypeError`. The types say
+  `Uint8Array`, but a JavaScript caller, a JSON round trip, or a `null` off a
+  closed socket can all reach it, and the library's stated invariant is that
+  malformed input maps to a reason and never escapes as a raw exception. This
+  was reachable in 0.3.0 too.
+
 ## [0.3.0] - 2026-08-07
 
 ### Breaking changes
@@ -117,7 +227,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   costs 415 bytes on the wire, 395 of them envelope, and 393 of those 395 if the
   filename is two characters shorter. The protocol part of that floor did not
   change, but the wire cost did: 0.2.1 base64url'd the envelope too, so the same
-  message cost 546 bytes of overhead there.
+  message cost 544 bytes of overhead there, re-measured against the published
+  0.2.1 tarball.
 - Both machines still need a route to each other, in practice the same LAN or a
   tunnel. There is no NAT traversal and no discovery.
 - The 0.3.0 numbers above were measured on one machine over loopback. They are

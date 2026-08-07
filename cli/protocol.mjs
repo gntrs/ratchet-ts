@@ -80,10 +80,23 @@
  *                is the sealed header plus every sealed chunk, each counted as
  *                its 4 byte length prefix plus its envelope. Not an estimate.
  *   overhead     wireBytes minus plainBytes, computed by the renderer.
- *   cryptoMs     seal and open only. The envelope packaging around them is
- *                charged to wall time instead, because calling transport work
- *                "crypto" is how a benchmark starts lying.
+ *   cryptoMs     CPU spent in every seal and every open this side performed,
+ *                the two handshake opens included, plus, on the frames that
+ *                still build a token, the conversion between that token and the
+ *                bytes on the socket. Nothing is left out. Before 0.3.1 the
+ *                conversion was, and the exclusion was worth more than it
+ *                sounded: see the frame seam note further down for what was
+ *                hidden and what deleted it.
  *   wallMs       first payload frame to final acknowledgement.
+ *
+ * cryptoMs and wallMs cover different windows, so on a fast payload path
+ * cryptoMs can be the larger of the two and that is not a bug. cryptoMs starts
+ * at the first handshake open and wallMs starts after the handshake is over, so
+ * the post-quantum handshake sits inside cryptoMs and inside handshakeMs and in
+ * neither of them twice. Since 0.3.1 deleted almost all of the payload phase
+ * CPU, what is left in cryptoMs on a small file is mostly the handshake. To ask
+ * whether a transfer was crypto bound or socket bound, compare cryptoMs against
+ * handshakeMs plus wallMs, not against wallMs alone.
  *   backend      which AEAD implementation ran, so two machines comparing
  *                throughput can see whether one of them was on the native path.
  *
@@ -250,11 +263,17 @@ function wrapCrypto(err, during) {
 
 /**
  * Run one crypto call, charging its duration to `clock` and nothing else.
- * cryptoMs minus socket time is the whole point of the split: the gap between
- * cryptoMs and wallMs is the honest answer to network bound or crypto bound.
+ * Keeping socket time out of it is the whole point of the split: what a
+ * transfer spends on the CPU and what it spends waiting are different numbers
+ * and a single figure covering both answers nothing.
  *
- * Only seal and open go through here. Envelope packaging does not, so the
- * figure stays comparable across a change to how frames are encoded.
+ * Everything a seal or an open costs goes through here, the handshake opens
+ * included, and on the frames that still build a token the conversion as well.
+ * Nothing is charged anywhere else, which is what makes the number comparable
+ * to another transport's. The seam note below says why that used to be untrue
+ * and is now. One consequence worth stating where the accumulator lives: the
+ * handshake opens land in cryptoMs before wallMs has started counting, so
+ * cryptoMs is not a subset of wallMs and never was.
  */
 async function timed(clock, during, fn) {
   const start = performance.now();
@@ -267,14 +286,61 @@ async function timed(clock, during, fn) {
   }
 }
 
-/**
- * Engine token to wire bytes.
- *
- * The engine's public surface speaks OCX1 tokens, so getting to the binary
- * form means decoding the token back into the envelope it already was. That is
- * packaging, not crypto, which is why it is outside timed(): charging it to
- * cryptoMs would inflate the one number people quote.
- */
+// ---------------------------------------------------------------------------
+// THE FRAME SEAM
+// ---------------------------------------------------------------------------
+//
+// The socket carries envelope bytes. Some of the engine's surface speaks tokens
+// instead, so a conversion has to happen somewhere, and toWire and fromWire are
+// the only two places in this file where it does. Every frame reaches them
+// through one of the four wrappers below; no call site inside sendPayload or
+// receivePayload touches an encoder itself.
+//
+// WHAT CHANGED IN 0.3.1, and why the arrangement is worth keeping. Until 0.3.1
+// every frame paid that conversion, and on the chunks it was pure waste: the
+// engine base64ed a sealed envelope into a token, and this file immediately
+// un-base64ed it straight back into the bytes it had just been. Twice per chunk
+// per transfer, once on each end. Measured on a 763.5 kB file, 12 chunks of
+// 65519 bytes, native AEAD, the token round trip cost 24 to 28 ms per endpoint
+// across repeated runs against about 1 ms for the same trip in the binary
+// codec, roughly 25 times.
+//
+// engine.sealToEnvelopeBytes and engine.openFromEnvelopeBytes deleted it. They
+// emit and accept the identical frame, byte for byte, so this is an internal
+// shortcut and not a wire change: a 0.3.0 peer cannot tell which call produced
+// the chunk it is opening.
+//
+// WHAT STILL CONVERTS, and why each one has to. Five frames per transfer, all of
+// them small and none of them in a loop:
+//
+//   invite, accept       engine.invite mints a token and engine.open hands one
+//                        back, because both are meant to be pasteable by a
+//                        human when there is no socket. No seal is involved, so
+//                        no bytes native seal can absorb them.
+//   ready, header, ack   sealed strings. engine.seal wipes the transient UTF-8
+//                        copy of the plaintext and a caller encoding the string
+//                        out here would leave that copy alive, so the string
+//                        path stays on engine.seal rather than being talked
+//                        into engine.sealToEnvelopeBytes with a hand rolled
+//                        utf8ToBytes in front of it. A few hundred bytes of
+//                        base64 is a cheaper price than a plaintext copy this
+//                        file cannot reach.
+//   every inbound frame  that is not a chunk goes through engine.open, which
+//                        dispatches on kind and therefore takes a token.
+//
+// Three of those five, ready and header and ack, are inside timed() as of
+// 0.3.1, so cryptoMs no longer excludes anything on the payload path. The
+// invite and the accept are not, and that is deliberate rather than an
+// oversight: both sit inside the window handshakeMs already reports end to end,
+// so charging them to cryptoMs as well would double count them against a clock
+// that is printed right beside it. Their conversion measures about 0.03 ms for
+// the pair, which is the whole of what neither clock attributes to base64.
+//
+// Before 0.3.1 cryptoMs excluded one base64 pass per frame and counted the
+// other, which is not a distinction any reader would have guessed from the
+// name.
+
+/** Engine token to wire bytes. The only outbound conversion in this file. */
 function toWire(token, what) {
   try {
     return encodeEnvelopeBytes(decodeEnvelope(token));
@@ -284,10 +350,12 @@ function toWire(token, what) {
 }
 
 /**
- * Wire bytes to engine token. Self describing, so no hint about which kind of
- * envelope is arriving: a receiver cannot know whether the next frame is an
- * invite, an accept or a message, and guessing wrong used to be a decode error
- * rather than a protocol error.
+ * Wire bytes to engine token. The only inbound conversion in this file.
+ *
+ * Self describing, so no hint about which kind of envelope is arriving: a
+ * receiver cannot know whether the next frame is an invite, an accept or a
+ * message, and guessing wrong used to be a decode error rather than a protocol
+ * error.
  */
 function fromWire(bytes, what) {
   try {
@@ -295,6 +363,90 @@ function fromWire(bytes, what) {
   } catch (err) {
     throw wrapCrypto(err, `decoding ${what}`);
   }
+}
+
+/**
+ * Handshake token straight to a frame.
+ *
+ * The invite and the accept are the two outbound frames a bytes native seal can
+ * never absorb, because neither comes out of a seal: one is engine.invite's
+ * token and the other is the reply engine.open hands back. This wrapper does
+ * nothing toWire does not. It exists so the two frames that still convert are
+ * visibly separate from the twelve that no longer do, and it is deliberately
+ * not charged to a clock: both frames fall inside the handshake window, which
+ * handshakeMs already measures end to end.
+ */
+function handshakeFrame(token, what) {
+  return toWire(token, what);
+}
+
+/**
+ * Seal one plaintext and hand back the frame that carries it.
+ *
+ * Every sealed frame this protocol sends comes through here: the ready frame,
+ * the payload header, all 12 chunks of a 763.5 kB file, the acknowledgement.
+ *
+ * The two branches are the same ratchet, since ratchetEncrypt in src/ratchet.ts
+ * is utf8ToBytes followed by ratchetEncryptBytes. They differ in what they do
+ * with the transient UTF-8 copy and in how they reach the wire. Bytes go
+ * straight out as envelope bytes. Strings keep the token detour so that
+ * engine.seal keeps ownership of the copy it wipes, and pay one base64 round
+ * trip on three small frames per transfer for it.
+ *
+ * Both branches are timed in full, conversion included. There is no longer a
+ * step in the sealing of a payload frame that cryptoMs does not see.
+ */
+async function sealFrame(clock, session, plaintext, what) {
+  if (typeof plaintext !== 'string') {
+    const sealed = await timed(clock, `sealing ${what}`, () =>
+      engine.sealToEnvelopeBytes(session, plaintext),
+    );
+    return { frame: sealed.envelope, session: sealed.session };
+  }
+  return timed(clock, `sealing ${what}`, async () => {
+    const sealed = await engine.seal(session, plaintext);
+    return { frame: toWire(sealed.token, what), session: sealed.session };
+  });
+}
+
+/**
+ * Open one inbound frame through engine.open, the entry point that can return
+ * any outcome. The outcome check stays at the call site, because what a wrong
+ * one means is protocol specific: an invite arriving where an accept was
+ * expected is a different sentence from an invite arriving where a chunk was.
+ *
+ * `during` names the crypto step inside an error message and defaults to the
+ * wire label, which is right at three of the five call sites. The header and the
+ * acknowledgement pass it explicitly because their two labels were already
+ * worded differently, and rewording an error a user reads is not part of a
+ * refactor.
+ *
+ * fromWire runs inside the timed callback so the conversion is charged rather
+ * than excluded. It keeps its own error wording: it throws an ordinary Error,
+ * which wrapCrypto passes through untouched, so a corrupt invite still reads
+ * "decoding the peer invite" and not "opening" it.
+ */
+async function openFrame(clock, identity, context, frame, what, during = `opening ${what}`) {
+  return timed(clock, during, () => engine.open(identity, fromWire(frame, what), context));
+}
+
+/**
+ * Chunk variant, and the reason 0.3.1 exists. engine.openFromEnvelopeBytes is
+ * message only, needs no identity, takes the frame exactly as the socket
+ * delivered it and hands back raw bytes rather than a UTF-8 decoding that would
+ * be lossy on a binary payload.
+ *
+ * Twelve of the thirteen payload frames in a 763.5 kB transfer arrive through
+ * here, so this is the half of the seam that decided what the change was worth.
+ *
+ * One user visible consequence of losing the separate decode step: a corrupt
+ * chunk used to fail as "decoding chunk 3 of 12" and now fails as "opening
+ * chunk 3 of 12". The reason code and the explanation are unchanged, and there
+ * is genuinely nothing being decoded separately any more, so the new verb is
+ * the true one.
+ */
+async function openChunkFrame(clock, session, frame, what) {
+  return timed(clock, `opening ${what}`, () => engine.openFromEnvelopeBytes(session, frame));
 }
 
 /** Real cost of putting one frame on the socket, prefix included. */
@@ -393,20 +545,16 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
   const handshakeStart = performance.now();
 
   const inviteFrame = await expectFrame(channel, 'the peer invite');
-  const invite = fromWire(inviteFrame, 'the peer invite');
-  let opened = await timed(clock, 'opening the peer invite', () => engine.open(identity, invite, {}));
+  let opened = await openFrame(clock, identity, {}, inviteFrame, 'the peer invite');
   if (opened.outcome !== 'invite') {
     throw new Error(`expected an invite from the receiver, got ${opened.outcome}`);
   }
   let session = opened.session;
-  await channel.send(toWire(opened.reply, 'the accept'));
+  await channel.send(handshakeFrame(opened.reply, 'the accept'));
 
   // The receiver speaks once here so this side gets a send chain. See step 3b.
   const readyFrame = await expectFrame(channel, 'the receiver ready frame');
-  const ready = fromWire(readyFrame, 'the receiver ready frame');
-  const readyOpen = await timed(clock, 'opening the receiver ready frame', () =>
-    engine.open(identity, ready, { session }),
-  );
+  const readyOpen = await openFrame(clock, identity, { session }, readyFrame, 'the receiver ready frame');
   if (readyOpen.outcome !== 'message') {
     throw new Error(`expected a ready frame from the receiver, got ${readyOpen.outcome}`);
   }
@@ -437,34 +585,34 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
   let wireBytes = 0;
   const wallStart = performance.now();
 
-  const sealedHeader = await timed(clock, 'sealing the header', () => engine.seal(session, header));
+  const sealedHeader = await sealFrame(clock, session, header, 'the header');
   session = sealedHeader.session;
-  const headerFrame = toWire(sealedHeader.token, 'the header');
-  wireBytes += wireCost(headerFrame);
-  await channel.send(headerFrame);
+  wireBytes += wireCost(sealedHeader.frame);
+  await channel.send(sealedHeader.frame);
 
   report(onProgress, 0, size);
   let done = 0;
   for (let i = 0; i < chunks; i += 1) {
     const start = i * chunk;
     const slice = payload.subarray(start, Math.min(start + chunk, size));
-    const sealed = await timed(clock, `sealing chunk ${i + 1} of ${chunks}`, () =>
-      engine.sealBytes(session, slice),
-    );
+    const sealed = await sealFrame(clock, session, slice, `chunk ${i + 1} of ${chunks}`);
     session = sealed.session;
-    const frame = toWire(sealed.token, `chunk ${i + 1} of ${chunks}`);
-    wireBytes += wireCost(frame);
+    wireBytes += wireCost(sealed.frame);
     // Awaited for backpressure only, not for a reply. The receiver is opening
     // chunk i while this loop is sealing chunk i + 1, which is the pipelining.
-    await channel.send(frame);
+    await channel.send(sealed.frame);
     done += slice.length;
     report(onProgress, done, size);
   }
 
   const ackFrame = await expectFrame(channel, 'the receiver acknowledgement');
-  const ackToken = fromWire(ackFrame, 'the receiver acknowledgement');
-  const ack = await timed(clock, 'opening the acknowledgement', () =>
-    engine.open(identity, ackToken, { session }),
+  const ack = await openFrame(
+    clock,
+    identity,
+    { session },
+    ackFrame,
+    'the receiver acknowledgement',
+    'opening the acknowledgement',
   );
   if (ack.outcome !== 'message') {
     throw new Error(`expected an acknowledgement, got ${ack.outcome}`);
@@ -509,23 +657,29 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   const handshakeStart = performance.now();
 
   const invited = await timed(clock, 'creating the invite', () => engine.invite(identity));
-  await channel.send(toWire(invited.token, 'the invite'));
+  await channel.send(handshakeFrame(invited.token, 'the invite'));
 
   const replyFrame = await expectFrame(channel, 'the sender reply');
-  const reply = fromWire(replyFrame, 'the sender reply');
-  const accepted = await timed(clock, 'opening the sender reply', () =>
-    engine.open(identity, reply, { pending: invited.pending }),
+  const accepted = await openFrame(
+    clock,
+    identity,
+    { pending: invited.pending },
+    replyFrame,
+    'the sender reply',
   );
   if (accepted.outcome !== 'accepted') {
     throw new Error(`expected an accept from the sender, got ${accepted.outcome}`);
   }
   let session = accepted.session;
 
-  const ready = await timed(clock, 'sealing the ready frame', () =>
-    engine.seal(session, JSON.stringify({ v: PROTOCOL_VERSION, ready: true })),
+  const ready = await sealFrame(
+    clock,
+    session,
+    JSON.stringify({ v: PROTOCOL_VERSION, ready: true }),
+    'the ready frame',
   );
   session = ready.session;
-  await channel.send(toWire(ready.token, 'the ready frame'));
+  await channel.send(ready.frame);
 
   const handshakeMs = performance.now() - handshakeStart;
   const peerWords = formatFingerprint(fingerprint(session.peer));
@@ -539,9 +693,13 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
 
   const headerFrame = await expectFrame(channel, 'the payload header');
   wireBytes += wireCost(headerFrame);
-  const headerToken = fromWire(headerFrame, 'the payload header');
-  const headerOpen = await timed(clock, 'opening the header', () =>
-    engine.open(identity, headerToken, { session }),
+  const headerOpen = await openFrame(
+    clock,
+    identity,
+    { session },
+    headerFrame,
+    'the payload header',
+    'opening the header',
   );
   if (headerOpen.outcome !== 'message') {
     throw new Error(`expected a payload header, got ${headerOpen.outcome}`);
@@ -572,10 +730,7 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   for (let i = 0; i < chunks; i += 1) {
     const frame = await expectFrame(channel, `chunk ${i + 1} of ${chunks}`);
     wireBytes += wireCost(frame);
-    const token = fromWire(frame, `chunk ${i + 1} of ${chunks}`);
-    const chunk = await timed(clock, `opening chunk ${i + 1} of ${chunks}`, () =>
-      engine.openBytes(session, token),
-    );
+    const chunk = await openChunkFrame(clock, session, frame, `chunk ${i + 1} of ${chunks}`);
     session = chunk.session;
     if (done + chunk.plaintext.length > header.size) {
       throw new Error(`chunk ${i + 1} overruns the declared size of ${header.size} bytes`);
@@ -598,11 +753,14 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
     );
   }
 
-  const ack = await timed(clock, 'sealing the acknowledgement', () =>
-    engine.seal(session, JSON.stringify({ ok: true, sha256 })),
+  const ack = await sealFrame(
+    clock,
+    session,
+    JSON.stringify({ ok: true, sha256 }),
+    'the acknowledgement',
   );
   session = ack.session;
-  await channel.send(toWire(ack.token, 'the acknowledgement'));
+  await channel.send(ack.frame);
   const wallMs = performance.now() - wallStart;
 
   return {

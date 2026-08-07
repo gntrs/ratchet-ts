@@ -315,6 +315,33 @@ export interface MessagingEngine {
     session: SessionState,
     token: EnvelopeToken,
   ): Promise<{ plaintext: Uint8Array; session: SessionState }>;
+
+  /**
+   * Byte-native counterpart of `sealBytes`: plaintext bytes in, envelope bytes
+   * out, with no token built at any point. The name spells the envelope side
+   * out because `sealBytes` already holds the short name for the plaintext
+   * side, and a caller who confused the two would base64 a binary frame onto a
+   * binary transport, which is the exact waste this method deletes.
+   *
+   * The frame is byte identical to `encodeEnvelopeBytes` of the token
+   * `sealBytes` would have produced for the same session and plaintext, so a
+   * peer on an older release cannot tell which method the sender used.
+   */
+  sealToEnvelopeBytes(
+    session: SessionState,
+    plaintext: Uint8Array,
+  ): Promise<{ envelope: EnvelopeBytes; session: SessionState }>;
+
+  /**
+   * Byte-native counterpart of `openBytes`, narrow for the same reason:
+   * message envelopes only, because invite and accept are protocol steps that
+   * produce a session rather than a payload, and a caller pulling chunks off a
+   * socket has nothing to do with one.
+   */
+  openFromEnvelopeBytes(
+    session: SessionState,
+    envelope: EnvelopeBytes,
+  ): Promise<{ plaintext: Uint8Array; session: SessionState }>;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { randomBytes } from '@noble/hashes/utils.js';
 
 import type { AcceptPayload, EnvelopePayload, InvitePayload, MessagePayload } from '../src/contract.js';
@@ -287,6 +288,28 @@ test('empty and stub input fails closed', () => {
   }
 });
 
+test('input that is not a byte array at all fails closed rather than throwing', () => {
+  // The types say Uint8Array. A JavaScript caller, a JSON round trip, or an
+  // await that quietly resolved to undefined all say otherwise, and this is the
+  // library boundary where that stops being the caller's problem. null and
+  // undefined used to escape as a raw TypeError out of `.length`, which broke
+  // the promise the rest of this file spends 200 lines proving.
+  for (const notBytes of [null, undefined, 'OCX1.message.AAAA', 42, {}, [1, 2, 3]]) {
+    const failure = failureOf(() => decodeEnvelopeBytes(notBytes as unknown as Uint8Array));
+    assert.equal(failure.reason, 'malformed_token', `wrong reason for ${String(notBytes)}`);
+  }
+
+  // Buffer is the one shape that must still pass, because that is exactly what
+  // a socket hands the CLI on every single frame.
+  const payload = sampleMessage(32);
+  const frame = encodeEnvelopeBytes(payload);
+  const asBuffer = Buffer.from(frame);
+  assert.ok(asBuffer instanceof Uint8Array, 'Buffer stopped extending Uint8Array');
+  // deepEqual compares prototypes, so this also pins that decoded fields come
+  // back as plain Uint8Arrays and do not inherit the shape of the input.
+  assert.deepEqual(decodeEnvelopeBytes(asBuffer), payload);
+});
+
 test('a wrong version byte fails as unknown_version', () => {
   const good = encodeEnvelopeBytes(sampleMessage(16));
   for (const version of [0x00, 0x02, 0x7f, 0xff]) {
@@ -457,4 +480,17 @@ test('decoding does not alias the caller buffer', () => {
   // goes into session state and must not change underneath it.
   frame.fill(0);
   assert.deepEqual(decoded, payload);
+});
+
+test('decoding does not alias a Buffer either, which is what a socket delivers', () => {
+  // The Uint8Array case above passed for years while this one did not, because
+  // Buffer overrides slice as an alias of subarray. Every frame the CLI reads
+  // off a socket arrives as a Buffer, so a caller that pools or reuses its read
+  // buffer would have watched session state change underneath it.
+  const payload = sampleMessage(64);
+  const frame = Buffer.from(encodeEnvelopeBytes(payload));
+  const decoded = decodeEnvelopeBytes(frame);
+  assert.deepEqual(decoded, payload);
+  frame.fill(0xaa);
+  assert.deepEqual(decoded, payload, 'decoded fields aliased the caller Buffer');
 });
