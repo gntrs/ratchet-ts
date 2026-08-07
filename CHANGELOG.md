@@ -5,6 +5,38 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-08-07
+
+### Fixed
+
+- `recv --once` no longer switches itself off when something connects without
+  sending anything. The help says one transfer and the code meant one
+  connection, so a port scan, a monitoring probe, or a peer whose link dropped
+  during the handshake would silently end a listener that the person on the
+  other machine still believed was waiting. Found by opening a bare socket to
+  a live receiver on a second box and closing it again, which killed it. A
+  transport failure now prints the reason and keeps listening. A crypto
+  failure still exits with code 2, unchanged, because bytes that do not verify
+  are somebody producing bytes, and looping there would hand them unlimited
+  attempts against a listener meant to take one file.
+- Three tests cover it, and they are the first in the suite to run the real
+  binary as a child process. The bug was in the accept loop in
+  `bin/ratchet.mjs`, which no unit test reaches, so a fake socket would have
+  proven nothing. The suite is 115 tests.
+
+### Changed
+
+- The README lost 224 lines of benchmark prose without losing a number. Four
+  releases of measurements had each been written up in place, so the same
+  763.5 kB file was described five times over and a reader had to assemble the
+  trend themselves. The per release narration is now one table, `Cost by
+  version`, and the detail that only matters once, method notes and
+  counterfactuals, moved to the release notes where it belongs. What a
+  transfer costs, and what changed between 0.3.0 and 0.3.1, stayed.
+
+No code changed beyond the accept loop. Same wire format, same API, same
+numbers.
+
 ## [0.3.1] - 2026-08-07
 
 Nothing on the wire moved. This release deletes base64 that was never on the

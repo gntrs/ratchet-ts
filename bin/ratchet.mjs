@@ -868,9 +868,30 @@ async function cmdRecv(opts) {
     }
 
     if (opts.once) {
-      await closeQuietly(server);
-      if (!failed) return 0;
-      return isCrypto(failed) ? 2 : 1;
+      // --once means one transfer, not one connection. Anything that opens a
+      // socket and then goes away without transferring is not the sender we
+      // are waiting for: a port scan, a monitoring probe, a peer whose link
+      // dropped before the handshake. Exiting on those turns a listener into
+      // something a single stray TCP connect can switch off, and the person
+      // waiting for the file has no idea it happened. So keep listening.
+      //
+      // A crypto failure is the one exception, and it exits. That is not a
+      // stranger knocking, it is somebody who reached the handshake and
+      // produced bytes that did not verify. Looping there would hand an
+      // attacker unlimited attempts against a listener the user believes is
+      // waiting for one file, so it stops and says so.
+      if (!failed) {
+        await closeQuietly(server);
+        return 0;
+      }
+      if (isCrypto(failed)) {
+        await closeQuietly(server);
+        return 2;
+      }
+      failures += 1;
+      say('');
+      say(color.dim('Waiting for a sender. Ctrl-C to stop.'));
+      continue;
     }
     if (failed) failures += 1;
     say('');
