@@ -210,9 +210,18 @@ intact rather than a faster route to a different answer.
 Read the two tables differently. The byte rows are exact and reproduce to the
 byte against the published tarballs. The loopback millisecond rows are medians
 of 21 runs. The real link rows are one run each, so 16.5% is the right order of
-magnitude and not a number to quote to three digits. 0.3.1 has not been run over
-that link at all: it changes CPU only, so on a 3 MB/s relay it would move the
-`crypto` row and very little else.
+magnitude and not a number to quote to three digits.
+
+The prediction for 0.3.1 on that link was that it changes CPU only, so on a
+3 MB/s relay it would move the `crypto` row and very little else. That has now
+been tried, and the first sample did not behave that way: it came back at
+0.60 MB/s against 3.58 for 0.3.0. The handshake column moved 38 percent across
+the same set of samples, and that code is identical in both versions, so the
+link was moving too and one run each settles nothing. It is written up honestly,
+including the second explanation that would be more interesting than noise, in
+[the two machine appendix](./bench/README.md#appendix-two-machines-one-relayed-link).
+Until that A/B is run properly, treat 0.3.1 and 0.3.2 over a real relay as
+unmeasured rather than as fast.
 
 The speed gain is smaller than the byte saving because the handshake is a fixed
 round trip that no amount of wire efficiency touches. Over a fast link this

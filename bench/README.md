@@ -399,3 +399,62 @@ If a number here looks wrong, the useful next step is `--runs 7` on an idle
 machine and a look at the spread column. A 7530U row in the main README was
 once 13.8 ms because the laptop was building something in the background at the
 time. Spread exists so that mistake is visible instead of published.
+
+## Appendix: two machines, one relayed link
+
+Everything above is one machine. This appendix is the other kind of run: a
+Windows laptop on Node 25 sending to a Linux box on Node 22, over a private
+mesh VPN that was relaying through a public relay rather than holding a direct
+path. It is here because it is the only measurement in the repo that includes a
+real network, and because it is currently inconclusive, which is worth writing
+down rather than leaving as a gap.
+
+Same payload every time: a 763.5 kB screenshot, 763499 plaintext bytes, 765285
+bytes on the wire, 12 chunks, SHA-256 `b2030ad109f232af` on both ends, native
+AEAD backend on both ends.
+
+| sample | sender | handshake | crypto | wall | throughput |
+|---|---|---|---|---|---|
+| A | 0.3.0 | 127 ms | 47 ms | 213 ms | 3.58 MB/s |
+| B | 0.3.2 | 175 ms | 46 ms | 1.3 s | 0.60 MB/s |
+| C | 0.3.0 | 140 ms | 65 ms | 274 ms | 2.79 MB/s |
+
+**These three cannot be compared to each other.** They were taken minutes apart
+and the link moved underneath them. The handshake column is the evidence: that
+code path is byte for byte identical in 0.3.0, 0.3.1 and 0.3.2, it does no
+bulk work, and it still reads 127, 175 and 140 ms across the three samples. A
+column that cannot change by version changed by 38 percent, so any other column
+moving by less than that is noise.
+
+What is not explained by that noise is sample B. Handshake variance across the
+set is about 1.4x. Sample B's throughput is 4.7x off sample A. Two candidate
+explanations, neither established:
+
+1. Ordinary relay noise, and one sample simply landed in a bad window. A single
+   observation on a shared relay is entirely capable of doing this.
+2. A real effect from the 0.3.1 change. Removing the base64 round trip made the
+   sender roughly three times faster at producing frames, which means the 12
+   chunks arrive at the socket as a tighter burst than they used to. On a link
+   with a small window, a burst can stall where a drip did not, and the process
+   that got faster at computing can get slower at delivering.
+
+Explanation 2 would be the more interesting result and it is the reason this is
+not being filed as noise by default. Distinguishing them needs the same file
+sent alternately by both versions inside one window, medians rather than single
+runs, against a receiver that stays up. `recv --once` exits after one completed
+transfer by design, so an A/B series needs the receiver started without it:
+
+```sh
+ratchet recv --out ~/Downloads --stats
+```
+
+Six sends per version, interleaved, is enough to see whether sample B survives.
+
+### What this appendix did establish
+
+The `--once` fix from 0.3.2 holds on a second machine and a real link. The
+receiver took a bare TCP connect from the sending side, stayed up, and then
+exited only after a completed transfer. Under 0.3.1 that first probe would have
+switched it off while the person on the other end was still typing the send
+command. That was the failure mode that produced the fix, and it is now
+confirmed off the machine it was written on.
