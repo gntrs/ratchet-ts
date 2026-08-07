@@ -71,7 +71,7 @@ const ELLIPSIS = '...';
 // Drops characters out of the middle rather than the end. Every line we box is
 // a short label followed by a long value, and for a filesystem path the two
 // parts worth keeping are the label at the front and the filename at the back.
-// Chopping the tail would leave "identity  C:\Users\ginta\AppData\Local\Te",
+// Chopping the tail would leave "identity  C:\Users\you\AppData\Local\Te",
 // which names no file the reader can act on.
 export function ellipsize(s, budget) {
   const text = String(s);

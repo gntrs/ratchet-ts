@@ -235,6 +235,44 @@ why the same 20 byte message cost 546 bytes of overhead there. It is also why th
 interesting numbers here are file sized: a chat line will always be mostly
 envelope.
 
+### The same file over a real network
+
+Loopback hides the transport, which is why the table above is a library
+measurement rather than a transfer measurement. This one is the opposite. The
+same 763.5 kB file moved between two different machines, a Windows 11 laptop on
+Node 25 and a Linux box on Node 22, over a private mesh VPN that was relaying
+through a public relay rather than taking a direct path. That is close to the
+worst realistic link: every packet crosses the internet twice.
+
+Both versions were run over that same link, with the same file, minutes apart.
+
+| | 0.2.1 | 0.3.0 | delta |
+|---|---|---|---|
+| plaintext | 763.5 kB | 763.5 kB | |
+| on the wire | 1.0 MB | 765.3 kB | 254.8 kB fewer, 25.0% |
+| overhead | 257.0 kB (33.7%) | 1.8 kB (0.2%) | the base64 is gone |
+| chunks | 12 x 65.5 kB | 12 x 65.5 kB | |
+| handshake | 115 ms | 127 ms | round trip noise |
+| crypto | 52 ms | 47 ms | |
+| AEAD backend | noble | native | |
+| wall time | 255 ms | 213 ms | 42 ms faster, 16.5% |
+| throughput | 3.00 MB/s | 3.58 MB/s | 19.3% faster |
+
+The hash matched on both sides both times, so this is the same file arriving
+intact, not a faster route to a different answer.
+
+Read that table honestly. The byte rows are exact: 1,020,096 bytes against
+765,288, counted the same way on both versions. The time rows are one run each
+on a relayed link, so 16.5% is the right order of magnitude and not a precise
+figure. The handshake row moving the wrong way is round trip variance, not a
+regression, and it is why the throughput gain (19.3%) is smaller than the byte
+saving (25.0%): the handshake is a fixed round trip cost that no amount of wire
+efficiency touches.
+
+The interesting row is `crypto`, at 47 ms inside a 213 ms wall time. Over a good
+network this library is the bottleneck. Over a bad one it is a fifth of the wait
+and the rest belongs to the relay.
+
 ## Quickstart
 
 This is the exact code the smoke test runs against the packed tarball, so it is
@@ -721,11 +759,14 @@ socket where nothing was ever going to be pasted anywhere. 0.3.0 stops paying it
 on the CLI path and keeps paying it in the token API, where being text is the
 entire feature.
 
-One caveat on the throughput numbers anywhere in this README: they are loopback.
-The 0.2.1 figure that produced 33.7% was measured once over a Tailscale relay on
-different hardware. The byte counts are comparable across those two runs. The
-MB/s numbers are not, and `bench/wire.mjs` prints `NOT COMPARABLE` in that cell
-rather than a speedup multiple.
+One caveat on the throughput numbers in this README. Everything except
+[the real network table](#the-same-file-over-a-real-network) is loopback, so
+those MB/s figures are what the library can do with the transport taken away,
+not what a transfer will feel like. The one honest speed comparison is that
+table, where both versions moved the same file over the same relayed link:
+16.5% faster wall time, 19.3% more throughput, 25.0% fewer bytes. `bench/wire.mjs`
+still prints `NOT COMPARABLE` in its own speedup cell, because its hard coded
+0.2.1 baseline came off a different link than the machine running the script.
 
 ## License
 
