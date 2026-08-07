@@ -60,6 +60,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "pretest": "tsup",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "gen:vectors": "tsx scripts/gen-vectors.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build",
