@@ -104,6 +104,21 @@ export type EnvelopeKind = 'invite' | 'accept' | 'message';
  */
 export type EnvelopeToken = string;
 
+/**
+ * The same three payloads in self-describing binary form.
+ *
+ * `EnvelopeToken` exists to be pasted into a chat box, and base64url is what
+ * makes that possible. It also costs a third of the body on every frame. Where
+ * the transport is already binary (a socket, a file, a BLOB column) that third
+ * buys nothing, so `encodeEnvelopeBytes` writes the same fields with a one byte
+ * version and a one byte kind in front instead. The kind travels in the bytes,
+ * so decoding needs no out-of-band hint.
+ *
+ * The two forms are alternative encodings of one payload, not two protocols.
+ * Neither is a wrapper over the other: converting means decode then re-encode.
+ */
+export type EnvelopeBytes = Uint8Array;
+
 export interface InvitePayload {
   readonly kind: 'invite';
   readonly sender: PublicIdentity;
@@ -137,6 +152,22 @@ export interface MessagePayload {
 }
 
 export type EnvelopePayload = InvitePayload | AcceptPayload | MessagePayload;
+
+// ---------------------------------------------------------------------------
+// AEAD backend
+// ---------------------------------------------------------------------------
+
+/**
+ * Which XChaCha20-Poly1305 implementation is doing the work.
+ *
+ * `native` is node:crypto's ChaCha20-Poly1305 with the nonce extended in
+ * TypeScript; `noble` is @noble/ciphers. They are selected automatically and
+ * produce byte-identical output for every input, so this is reporting, not
+ * configuration. It is exported because "why is this slow" is answerable only
+ * if a caller can see which one it got, and a browser or a locked-down runtime
+ * legitimately gets `noble`.
+ */
+export type AeadBackend = 'native' | 'noble';
 
 // ---------------------------------------------------------------------------
 // Session state

@@ -48,40 +48,192 @@ Runtime deps, all MIT: `@noble/curves`, `@noble/ciphers`, `@noble/hashes`,
 
 ## Send a file between two machines
 
-The package ships a `ratchet` command. Two machines on the same network, three
-commands, no account and no setup.
-
-On the machine receiving the file:
+The package ships a `ratchet` command. Two machines, two commands, no account
+and no setup. Install it on both:
 
 ```sh
-npx ratchet recv
+npm install -g ratchet-ts
 ```
 
-It prints its LAN addresses and the exact command to run on the other machine.
-On the machine sending the file:
+Note the `-g`. A plain `npm install ratchet-ts` puts the binary in
+`node_modules/.bin` and it never reaches your PATH, so `ratchet` comes back as
+command not found.
+
+**On the machine receiving the file**, start the listener first:
 
 ```sh
-npx ratchet send holiday.jpg --to 192.168.1.24
+ratchet recv --out . --once
 ```
+
+`--out` takes a real path and does no expansion of its own, so `~/Downloads` is
+fine in bash and zsh, where the shell expands it first, and creates a folder
+literally named `~` in PowerShell and cmd, where nothing does. On Windows write
+it out: `--out $HOME\Downloads` in PowerShell, `--out %USERPROFILE%\Downloads` in
+cmd. The banner prints the directory it resolved to, so read that line before you
+go looking for the file.
+
+It prints every address it can be reached on, each one already written out as
+the command to run on the other machine, with `FILE` where your filename goes.
+**On the machine sending**, run that line with the name filled in:
+
+```sh
+ratchet send holiday.jpg --to 192.168.1.24 --stats
+```
+
+`--stats` is optional and prints the size, the time and the overhead afterwards.
 
 Text works the same way, and a dash reads stdin so a pipe works:
 
 ```sh
-echo "the wifi password is hunter2" | npx ratchet send - --to 192.168.1.24
+ratchet send --text "the wifi password is hunter2" --to 192.168.1.24
+echo "same thing from a pipe" | ratchet send - --to 192.168.1.24
 ```
+
+### Moving a .env
+
+This is the case that probably brought you here. A colleague needs the dev
+`.env`, or your other laptop does, and the options are Slack, a ticket, or a
+password manager that then keeps a copy of it forever.
+
+```sh
+# them, first
+ratchet recv --out . --once
+
+# you, with the address it printed
+ratchet send .env --to 192.168.1.24
+```
+
+The bytes go straight from your machine to theirs over TCP. Nothing is uploaded,
+nothing is stored, and when both processes exit there is no copy anywhere except
+the two disks that were always going to have one.
+
+`ratchet` notices when a transferred file looks like a secret: `.env`, `*.pem`,
+`*.key`, `id_ed25519`, anything with `secret` or `credential` in the name. It
+never prompts and never refuses, it just says it saw. The warning prints **on the
+receiving machine**, after the file is written, and what it says is that the
+transfer was encrypted and the file now sitting on that disk is not. The sending
+side prints nothing extra. With `--json` the receiver's object carries
+`"secret": true` for the same files.
+
+### Talking instead of transferring
+
+`ratchet chat` is the same handshake with a line-oriented terminal on top.
+Nothing is written to disk at either end.
+
+```sh
+# one side
+ratchet chat --port 4477
+
+# the other, with the address the first one printed
+ratchet chat --to 192.168.1.24:4477
+```
+
+Type a line, press enter, it arrives. `/quit`, Ctrl-C or Ctrl-D ends it and both
+sides print how many messages moved. The same six safety words appear, and the
+same rule applies: compare them out loud.
+
+A chat only pairs with another chat. Both ends open with an invite and settle
+the tiebreak between themselves, so `ratchet chat` will not talk to
+`ratchet recv`, and it does not accept a file.
+
+If you would rather install nothing, `npx ratchet-ts recv` and
+`npx ratchet-ts send ...` do the same job. Spell out `ratchet-ts`: `npx ratchet`
+is an unrelated package by somebody else.
 
 The file contents and the metadata around them (the filename, the size, the
 hash) are all encrypted with the same ratchet the library exposes. It is a
 direct TCP connection between the two machines: no relay, no server, no account,
 nothing of yours in the middle.
 
-Both ends print six safety words the moment the handshake lands, before the
-bytes finish moving. **Compare them out of band**, out loud or over a channel an
-attacker on this network does not control. Matching words mean you are talking
-to the machine you think you are. Nobody checks this for you.
+Both ends print two lines of six safety words the moment the handshake lands,
+before the bytes finish moving.
+
+```
+  compare aloud  scan  fiber  black  abstract  cradle  struggle
+  peer identity  derive  remain  trip  noise  bean  fix
+```
+
+**Compare the `compare aloud` line out of band**, out loud or over a channel an
+attacker on this network does not control. That line belongs to the pair, so it
+reads the same on both screens, and matching words mean you are talking to the
+machine you think you are. Nobody checks this for you.
+
+The `peer identity` line names the **other** machine, so the two screens show
+different words there, and that is correct. It is the same six words that machine
+prints for itself under `ratchet id`, and the same words the receiver shows in
+the `you` line of its own banner. That is the cross-check: the sender's
+`peer identity` should read back the receiver's `you` line. Do not expect it to
+match your own words. If it ever does, you have connected to yourself.
 
 Add `--stats` for the full measurement table, `--json` to pipe the numbers into
 something else, and `ratchet id` to see this machine's own words.
+
+### A real transfer, end to end
+
+A 763.5 kB file moved between two `ratchet` processes over loopback on one
+machine, 0.3.0, Ryzen 5 7530U, Node 25, Windows 11. Both `--stats` tables, side
+by side:
+
+| | sender | receiver |
+|---|---|---|
+| plaintext | 763.5 kB | 763.5 kB |
+| on the wire | 765.3 kB | 765.3 kB |
+| overhead | 1.8 kB (0.2%) | 1.8 kB (0.2%) |
+| chunks | 12 x 65.5 kB | 12 x 65.5 kB |
+| handshake | 48 ms | 37 ms |
+| crypto | 49 ms | 53 ms |
+| AEAD backend | native | native |
+| wall time | 62 ms | 70 ms |
+| throughput | 12.23 MB/s | 10.98 MB/s |
+| SHA-256 | `fdd05cad23edb796` | `fdd05cad23edb796` |
+
+The hashes match, so the bytes that landed are the bytes that left. Loopback
+means the transport row is close to free, which is the point of showing it: at
+12 MB/s with 49 ms of crypto in a 62 ms wall time, this library is now the thing
+you are waiting for, not the wire. On a real network the wall time is the
+network's and the crypto row barely moves.
+
+That table is one run. Five repeats of the same transfer on the same machine put
+the sender between 12.3 and 14.0 MB/s, median 13.1, and the receiver between
+11.7 and 13.3 MB/s, median 11.8, with the crypto row between 46 and 53 ms. The
+byte rows are exact and repeat to the byte. Read the wall time and throughput
+rows as plus or minus 10%.
+
+The `on the wire` row counts the frames that carry the file, the sealed header
+and the twelve chunks. It does not count the handshake. A relay counting every
+socket byte in both directions measures the handshake at 2384 bytes out and 1619
+bytes back, identical on every transfer whatever the file size, so the socket
+actually moved 767.7 kB out and 1.6 kB back for this file: 0.55% overhead
+outbound, 0.76% counting both directions. The 0.2.1 figure below leaves the
+handshake out in exactly the same way, so the comparison is fair, but a packet
+capture will show you the larger number.
+
+The 0.2.1 version of this same table read 1.0 MB on the wire, 257.0 kB of
+overhead, 33.7%. Nothing about the encryption changed. See
+[the wire](#the-wire) for what did.
+
+The overhead is a fixed cost per chunk rather than a percentage, which is worth
+seeing at the other end of the scale. `ratchet send --text` with 20 bytes in it:
+
+```
+Plaintext received      20 B
+On the wire            415 B
+Overhead               395 B (1975.0%)
+Chunks              1 x 65.5 kB
+```
+
+395 bytes to carry 20, down from 546 on 0.2.1. The floor is the envelope: a 24
+byte nonce, a 16 byte Poly1305 tag, a 32 byte ratchet public key, plus the length
+prefixes and the sealed header that carries the filename. It is exact, not
+approximate, but it moves with the name: `--text` sends `message.txt` and pays
+395, while the bench table further down sends `bench.bin` and reports 393. Two
+characters of filename, two bytes.
+
+The protocol part of that floor is the same in 0.2.1 and 0.3.0. The wire cost is
+not, because 0.2.1 base64url'd the envelope along with everything else, which is
+why the same 20 byte message cost 546 bytes of overhead there. It is also why the
+interesting numbers here are file sized: a chat line will always be mostly
+envelope.
 
 ## Quickstart
 
@@ -151,8 +303,10 @@ encoding, and a `sealBytes` token that happens to be valid UTF-8 opens under
 `open`. One token carries at most 65519 bytes of plaintext; chunk anything
 bigger yourself.
 
-Want to watch it work first? `node examples/demo.mjs` runs a full handshake, a
-message each way, and a tamper that fails closed.
+Want to watch it work first? Clone the repo and run `node examples/demo.mjs` for
+a full handshake, a message each way, and a tamper that fails closed. The
+`examples/` directory is in git, not in the npm package, which ships only `dist`,
+`bin` and `cli`.
 
 ## Persist and restore
 
@@ -236,10 +390,6 @@ HMAC-SHA256, one unique key per message, none walkable backward. Messages are
 sealed with XChaCha20-Poly1305, header bound in as AAD. Skipped keys are kept up
 to `MAX_SKIP = 1000` per chain; a larger gap is refused, not allocated.
 
-**Wire format.** Every token is one ASCII string: `OCX1.<kind>.<base64url>`,
-`<kind>` in `invite | accept | message`, payload a compact binary body (not JSON)
-so it round-trips byte-exact for the AAD binding. Safe to paste into any channel.
-
 **Where the post-quantum protection actually is.** The ML-KEM-768 contribution
 is in the HANDSHAKE. It is mixed into the root key once, when the conversation
 opens, and it is what makes recorded traffic safe from harvest-now-decrypt-later.
@@ -277,6 +427,38 @@ post-quantum ratchet, and it should not be described as one.
   <text x="316" y="272" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">ratcheting both directions, one key per message</text>
 </svg>
 
+### The wire
+
+There are two encodings of the same envelope, and 0.3.0 is the release that
+stopped confusing them.
+
+**The token.** `OCX1.<kind>.<base64url>`, `<kind>` in `invite | accept |
+message`. One ASCII string, safe to paste into a chat box, an email, a QR code,
+a JSON field. The payload underneath is a compact binary body, not JSON, so it
+round-trips byte-exact for the AAD binding. This is what `engine.seal`,
+`engine.invite` and `engine.open` speak, it is unchanged from 0.2.1 down to the
+byte, and the known-answer vectors in `test/vectors.json` still pass untouched.
+
+**The bytes.** `encodeEnvelopeBytes` / `decodeEnvelopeBytes`, new in 0.3.0. A
+one byte version, a one byte kind tag, then exactly the bytes the token
+base64urls. Self describing, so decoding needs no out-of-band hint about which
+kind is arriving. The version byte is `0x01`, chosen because a token starts with
+`O` (`0x4f`), so handing a token to the byte decoder is rejected as
+`unknown_version` rather than misparsed.
+
+Base64url costs one third. On a socket, where nobody is pasting anything, that
+third bought nothing, and it was 33.4 of the 33.7 points of overhead this project
+shipped with. The other 0.3 is the envelope itself and is still being paid. The
+CLI now sends bytes and the number is 0.2%. The token API is untouched, because
+for the paste-anywhere case the text encoding is the whole point.
+
+The framing changed with it. `cli/frame.mjs` was newline delimited text and is
+now `[u32 big endian length][payload]`, capped at 8 MiB.
+
+**This is a breaking wire change.** A 0.2.1 CLI cannot talk to a 0.3.0 CLI in
+either direction, and there is no version negotiation to soften it. Both
+machines upgrade or neither does. Nothing in the library API broke.
+
 ## Runs on
 
 No Node APIs in the core, only WebCrypto and the noble libraries, so the same
@@ -288,8 +470,10 @@ build runs everywhere:
 - Browsers: serve the repo root (`npx serve`) and open `/examples/browser.html`
 - Cloudflare Workers: expected to work for the same reason, not yet CI-tested
 
-Run `npm ci && npm run build` first: the smoke test exercises `dist/index.js`,
-the exact artifact npm installs. CI proves Node, Bun and Deno on every push.
+These run from a clone, not from an install: `examples/` is not in the package.
+Clone it, then `npm ci && npm run build` first, because the smoke test exercises
+`dist/index.js`, the exact artifact npm installs. CI proves Node, Bun and Deno on
+every push.
 
 ## Limits
 
@@ -378,10 +562,22 @@ a wrong error is a failing test.
   survive the wire untouched, string and byte tokens interoperate in both
   directions, and a one-bit tamper on a bytes token fails closed and leaves the
   session able to open the honest copy.
+- **Binary envelope.** The 0.3.0 byte form round trips every kind, and the string
+  form is proven unchanged by re-encoding the known-answer vector tokens and
+  diffing. Truncation is tested byte by byte at every offset, plus trailing
+  bytes, an overrunning length prefix, a token fed to the byte decoder, and
+  buffer aliasing. A wrong version byte is refused rather than guessed at.
+- **AEAD equivalence.** The native backend is checked byte-for-byte against
+  `@noble/ciphers` across random keys, nonces, plaintexts and AAD, empty
+  plaintext and 64 KiB included, both backends forced explicitly so a machine
+  without native support still tests the path it does not use.
+- **Framing.** The length-prefixed wire is tested for prefixes split across TCP
+  reads, several frames arriving in one event, the 8 MiB cap, a lying length
+  refused before allocation, and clean EOF.
 
 Plus envelope round-trips across all three token kinds, deterministic
 fingerprints, out-of-order delivery across ratchet turns, and identity-mismatch
-handling. 40 tests.
+handling. 89 tests, `.ts` and `.mjs`.
 
 ```sh
 npm install && npm test && npm run typecheck && npm run build
@@ -415,13 +611,13 @@ Single thread, no tuning. `--runs N` repeats the whole bench and reports the spr
 | Core i5-10400F (desktop 2020, WSL) | 22 | 10.9 ms | 0.053 ms | 0.057 ms |
 | Core i5-10400F (same box, Windows) | 24 | 11.5 ms | 0.042 ms | 0.044 ms |
 
-The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Ciphertext overhead is a constant **+259 bytes per message** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware.
+The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Token overhead for a 256 byte message is **+259 bytes** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware. That 259 is not a constant: the body is base64url, so a third of it scales with the plaintext, and a 65519 byte message pays 22013 bytes. The binary envelope overhead **is** constant, 122 bytes at any size, which is where the CLI numbers below come from.
 
 The bench is single-core bound, so a newer core beats a bigger machine. The fastest row is a 2020 ultrabook: the M1 tops every column, and the 2022 laptop chip behind it still outruns the 5800X3D desktop, while a 32-core EPYC server lands mid-table. Core count buys concurrent sessions, not a faster handshake. The M1 run did not record its Node version, and it was measured on 0.1.0, before the byte-first ratchet rewrite in 0.2.0.
 
 The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. For scale, three back-to-back runs on the idle VPS varied by 3.3 percent on both handshake and `seal`, so single-digit gaps are run-to-run noise and only the larger one is worth a second look. `keygen` on that same VPS spread 33 percent across the three runs, which is what a noisy neighbour on shared hardware looks like and the reason `--runs` prints the spread at all.
 
-The 7530U row is a correction. It first went in the table at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it is 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. A bench number is only as good as the machine was quiet, so `--runs` exists and the spread is printed.
+The 7530U row is a correction. It first went in the table at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it is 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. A bench number is only as good as the machine was quiet, so `--runs` exists and the spread is printed. That row has not been reproduced on 0.3.0: three runs on the same laptop with a normal desktop load read 8.9 ms handshake, 0.041 ms `seal`, 0.046 ms `open`, so treat the row as a floor from a quiet machine rather than what you will see.
 
 The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs); a fixed-iteration CI bench is planned so numbers only move when the code does.
 
@@ -450,6 +646,86 @@ The last row is the one that moved. 0.1.0 had no bytes API, so the only way to s
 </picture>
 
 The other change has no number. On 0.1.0, `JSON.stringify` on a session silently turned every `Uint8Array` key into `{}`, and the next `seal` threw `"key" expected Uint8Array`. A page reload ended the conversation. On 0.2.0 the session is a token you can put in a database and hand back later.
+
+### 0.2.1 to 0.3.0
+
+```sh
+npm run bench:wire
+```
+
+A second harness, separate from `npm run bench`. It stands the real
+`cli/frame.mjs` server up on loopback with a byte-counting relay in front of it,
+pushes real transfers through, and reports what the socket actually carried
+rather than what the arithmetic predicts. Ryzen 5 7530U, Node 25, Windows 11,
+median of 3 runs.
+
+**Bytes on the wire.** Same payload, 0.2.1 base64url token plus newline against
+the 0.3.0 binary envelope plus u32 length prefix:
+
+| plaintext | 0.2.1 wire | 0.3.0 wire | 0.3.0 overhead | saved |
+|---|---|---|---|---|
+| 20 B | 563 B | 413 B | 393 B (1965.0%) | 26.6% |
+| 1.0 kB | 1.9 kB | 1.4 kB | 395 B (38.6%) | 25.5% |
+| 65.5 kB | 88.1 kB | 66.1 kB | 522 B (0.8%) | 25.0% |
+| 1.0 MB | 1.4 MB | 1.1 MB | 2.4 kB (0.2%) | 25.0% |
+| 10.5 MB | 14.0 MB | 10.5 MB | 20.6 kB (0.2%) | 25.0% |
+
+The saving converges on 25% because that is exactly what base64url costs. The
+small end never gets good in percentage terms, because 393 bytes of envelope
+under a 20 byte message is arithmetic nobody can beat.
+
+**AEAD.** `src/aead.ts` prefers Node's native `chacha20-poly1305` through
+`crypto.createCipheriv` and falls back to `@noble/ciphers` everywhere else, with
+`aeadBackend()` reporting which one is live. Byte-identical output either way,
+checked against 200 random tuples on every bench run before any timing is
+reported. MB/s, higher is better:
+
+| op | `@noble/ciphers` | `src/aead.ts` (native) | ratio |
+|---|---|---|---|
+| seal 256 B | 26.7 | 28.8 | 1.08x |
+| open 256 B | 24.4 | 29.3 | 1.20x |
+| seal 65519 B | 154.6 | 599.9 | 3.88x |
+| open 65519 B | 150.3 | 761.1 | 5.06x |
+
+Small messages are dominated by call overhead and the native path buys almost
+nothing. At chunk size it is 4x to 5x, which is the case the CLI is in.
+
+Those cells are one run and they move. Nine repeats that alternate the two
+backends inside each repeat, so neither one gets the cold cache or the boost
+clock to itself, put the chunk sized ratios at 4.8x seal and 5.7x open at the
+median, and the worst repeat of the nine still read 3.9x seal and 4.7x open. The
+256 B ratios wandered between 1.03x and 1.36x, which is a longer way of saying
+there is nothing there.
+
+**Handshake, split.** 3 one-way flights, so 1.5 round trips before a payload byte
+moves:
+
+| side | wall | crypto | transport | crypto share |
+|---|---|---|---|---|
+| sender | 14.66 ms | 7.66 ms | 7.00 ms | 52.3% |
+| receiver | 10.84 ms | 5.56 ms | 5.28 ms | 51.3% |
+
+Run to run spread on those cells is about a third, so read them as ten to fifteen
+milliseconds, not as four significant figures. Loopback round trip on this
+machine is 0.08 ms, so the transport column above is almost entirely process
+scheduling, not network. Substitute your own link: at 40 ms RTT the same
+handshake costs about 60 ms of transport and the crypto column does not move.
+
+**The honest version of the headline.** The 33.7% overhead this project shipped
+with was not the cost of encryption. Encryption costs 0.06%: a 24 byte nonce and
+a 16 byte tag on a 65519 byte chunk. Add the rest of the envelope, the ratchet
+public key and the sealed header and the length prefixes, and the whole 0.3.0
+wire cost on that 763.5 kB file is 0.23%. The remaining 33.4 points were
+base64url, which taxes payload and envelope alike at exactly a third, paid on a
+socket where nothing was ever going to be pasted anywhere. 0.3.0 stops paying it
+on the CLI path and keeps paying it in the token API, where being text is the
+entire feature.
+
+One caveat on the throughput numbers anywhere in this README: they are loopback.
+The 0.2.1 figure that produced 33.7% was measured once over a Tailscale relay on
+different hardware. The byte counts are comparable across those two runs. The
+MB/s numbers are not, and `bench/wire.mjs` prints `NOT COMPARABLE` in that cell
+rather than a speedup multiple.
 
 ## License
 

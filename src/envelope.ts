@@ -179,6 +179,66 @@ export function encodeEnvelope(payload: EnvelopePayload): EnvelopeToken {
   return `${ENVELOPE_VERSION}.${payload.kind}.${toBase64Url(encodeBody(payload))}`;
 }
 
+/**
+ * Binary envelope form, for transports that carry bytes rather than text.
+ *
+ * The string form spends 4 bytes of wire on every 3 bytes of payload because
+ * base64 is 4/3 inflation. On a socket that is pure waste: the framing layer
+ * already delimits messages, so there is nothing for base64 to protect against.
+ * This form is the same body, unencoded, which is exactly 3/4 of the size once
+ * the fixed prefix stops mattering.
+ *
+ * Two header bytes make it self describing, because unlike the string form
+ * there is no `OCX1.<kind>.` prefix to carry that out of band:
+ *
+ *   [0] version marker, BINARY_ENVELOPE_VERSION
+ *   [1] kind tag, see BINARY_KIND_TAGS
+ *   [2..] the same body bytes the string form base64s
+ *
+ * The version marker is deliberately a value no OCX1 string token can start
+ * with, so a token pasted into the byte path is rejected as a version problem
+ * rather than being misread as a kind tag and a body.
+ */
+const BINARY_ENVELOPE_VERSION = 0x01;
+
+const BINARY_KIND_TAGS: Readonly<Record<EnvelopeKind, number>> = {
+  invite: 0x01,
+  accept: 0x02,
+  message: 0x03,
+};
+
+/** Index is the tag byte. Sparse on purpose: an unlisted byte is a hard reject. */
+const BINARY_KIND_BY_TAG: readonly (EnvelopeKind | undefined)[] = [
+  undefined,
+  'invite',
+  'accept',
+  'message',
+];
+
+export function encodeEnvelopeBytes(payload: EnvelopePayload): Uint8Array {
+  const body = encodeBody(payload);
+  const out = new Uint8Array(2 + body.length);
+  out[0] = BINARY_ENVELOPE_VERSION;
+  out[1] = BINARY_KIND_TAGS[payload.kind];
+  out.set(body, 2);
+  return out;
+}
+
+export function decodeEnvelopeBytes(bytes: Uint8Array): EnvelopePayload {
+  if (bytes.length < 2) fail('malformed_token', 'binary envelope is shorter than its two byte header');
+  // Version before kind, same order as the string form, so a future OCX2 byte
+  // stream reports "update your client" rather than "unknown kind".
+  if (bytes[0] !== BINARY_ENVELOPE_VERSION) {
+    fail('unknown_version', `unsupported binary envelope version ${bytes[0]}`);
+  }
+  const kind = BINARY_KIND_BY_TAG[bytes[1]!];
+  if (kind === undefined) fail('malformed_token', `unknown envelope kind tag ${bytes[1]}`);
+  // subarray, not slice: Reader copies every field it hands back, so nothing
+  // that escapes this function shares a buffer with the caller's frame anyway,
+  // and copying the whole body here would double the cost of the fast path.
+  return decodeBody(kind, bytes.subarray(2));
+}
+
 export function decodeEnvelope(token: EnvelopeToken): EnvelopePayload {
   const trimmed = token.trim();
   const parts = trimmed.split('.');

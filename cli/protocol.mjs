@@ -5,17 +5,20 @@
  * WIRE PROTOCOL
  * ---------------------------------------------------------------------------
  *
- * Every frame is one ratchet-ts token, newline delimited by cli/frame.mjs.
- * Nothing but tokens crosses the socket, so a passive observer learns the byte
- * count and nothing else: not the filename, not the size, not the hash.
+ * Every frame is one ratchet-ts envelope in its binary form, length prefixed by
+ * cli/frame.mjs: a u32 big endian byte count, then the envelope. No base64 and
+ * no newline delimiter, so the bytes on the socket are the bytes the encoder
+ * produced. Nothing but envelopes crosses the socket, so a passive observer
+ * learns the byte count and nothing else: not the filename, not the size, not
+ * the hash.
  *
- *   1. RECEIVER -> SENDER   invite token
+ *   1. RECEIVER -> SENDER   invite envelope
  *
  *      The receiver invites. It is the long lived listener, so it is the party
  *      with a stable address, and inviting first means the sender needs no
  *      prior knowledge beyond host and port.
  *
- *   2. SENDER -> RECEIVER   accept token
+ *   2. SENDER -> RECEIVER   accept envelope
  *
  *      `engine.open(identity, invite, {})` yields outcome `invite` with a reply
  *      and a session. The reply goes straight back.
@@ -43,6 +46,10 @@
  *   5. SENDER -> RECEIVER   exactly `chunks` sealed byte frames, in order,
  *                           each at most `chunkSize` plaintext bytes.
  *
+ *      Pipelined, not lockstep. The sender never waits for a per chunk
+ *      acknowledgement, only for the socket to drain, so a high latency link
+ *      costs one round trip for the whole transfer instead of one per chunk.
+ *
  *   6. RECEIVER             opens header, opens each chunk, appends, then
  *                           recomputes sha256 over the assembled bytes and
  *                           compares against the header. Mismatch throws.
@@ -60,14 +67,60 @@
  * Sessions are immutable. Every seal and open returns a new one and the old one
  * is dead the instant it is used. Each call site here reassigns in place for
  * that reason, and there is deliberately never a second live copy in scope.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THE NUMBERS MEAN
+ * ---------------------------------------------------------------------------
+ *
+ * People compare these figures against other transports, so the definitions
+ * have to be stated rather than inferred:
+ *
+ *   plainBytes   the payload, exactly. Not the header, not the JSON.
+ *   wireBytes    real bytes handed to the socket for the PAYLOAD phase, which
+ *                is the sealed header plus every sealed chunk, each counted as
+ *                its 4 byte length prefix plus its envelope. Not an estimate.
+ *   overhead     wireBytes minus plainBytes, computed by the renderer.
+ *   cryptoMs     seal and open only. The envelope packaging around them is
+ *                charged to wall time instead, because calling transport work
+ *                "crypto" is how a benchmark starts lying.
+ *   wallMs       first payload frame to final acknowledgement.
+ *   backend      which AEAD implementation ran, so two machines comparing
+ *                throughput can see whether one of them was on the native path.
+ *
+ * The handshake frames are deliberately OUTSIDE wireBytes. They are measured by
+ * handshakeMs instead, and folding a fixed ~2.5 kB post-quantum handshake into
+ * an overhead percentage that is defined against the payload would make the
+ * percentage say more about the file size than about the protocol.
  */
 
 import { createHash } from 'node:crypto';
 
-import { engine, fingerprint, formatFingerprint, isCryptoFailure, publicOf } from '../dist/index.js';
+import {
+  aeadBackend,
+  decodeEnvelope,
+  decodeEnvelopeBytes,
+  encodeEnvelope,
+  encodeEnvelopeBytes,
+  engine,
+  fingerprint,
+  formatFingerprint,
+  isCryptoFailure,
+  publicOf,
+} from '../dist/index.js';
 
-/** Bumped only on a breaking frame change, so a mismatch is a clean refusal. */
-const PROTOCOL_VERSION = 1;
+/**
+ * Bumped for the binary frame format.
+ *
+ * A v1 peer can never reach this check: it delimits frames with newlines and
+ * this one reads a u32 length prefix, so the two disagree about where a frame
+ * ends long before anything is sealed or opened. The number is therefore a
+ * record of the break rather than a guard against it, and the guard lives in
+ * frame.mjs, which refuses an implausible length.
+ */
+export const PROTOCOL_VERSION = 2;
+
+/** u32 big endian length prefix per frame, set by cli/frame.mjs. */
+const FRAME_PREFIX_BYTES = 4;
 
 /**
  * Hard ceiling imposed by the envelope, not chosen here.
@@ -75,9 +128,10 @@ const PROTOCOL_VERSION = 1;
  * Every variable length field in an OCX1 envelope carries a u16 length prefix,
  * so a ciphertext cannot exceed 65535 bytes, and XChaCha20-Poly1305 adds a 16
  * byte tag. 65519 plaintext bytes is therefore the largest message the library
- * can encode at all: one byte more and `encodeEnvelope` throws a RangeError
- * before any crypto runs. Raising this needs a u32 prefix in src/envelope.ts,
- * which is a wire format change, so it is not a knob this file can turn.
+ * can encode at all: one byte more and the encoder throws a RangeError before
+ * any crypto runs. Raising this needs u32 field prefixes in src/envelope.ts,
+ * which is a wire format change, and that change is deliberately not in this
+ * release, so it is not a knob this file can turn.
  */
 const WIRE_MAX_PLAINTEXT = 0xffff - 16;
 
@@ -85,13 +139,25 @@ const DEFAULT_CHUNK = Math.min(64 * 1024, WIRE_MAX_PLAINTEXT);
 const MIN_CHUNK = 1024;
 const MAX_CHUNK = Math.min(4 * 1024 * 1024, WIRE_MAX_PLAINTEXT);
 
+// Load time assertion on the arithmetic above. If a future edit raises one of
+// these constants past the envelope ceiling, the failure has to be this line
+// and not a RangeError thrown from inside the encoder on chunk 900 of 2000,
+// after the receiver has already committed to a size and a chunk count.
+if (MAX_CHUNK > WIRE_MAX_PLAINTEXT || DEFAULT_CHUNK > WIRE_MAX_PLAINTEXT) {
+  throw new Error(
+    `chunk ceiling is wrong: default ${DEFAULT_CHUNK}, max ${MAX_CHUNK}, but an OCX1 envelope ` +
+      `cannot carry more than ${WIRE_MAX_PLAINTEXT} plaintext bytes in one frame`,
+  );
+}
+
 /** Exported so the CLI can show the real figure rather than the one asked for. */
 export const MAX_CHUNK_BYTES = MAX_CHUNK;
 export const DEFAULT_CHUNK_BYTES = DEFAULT_CHUNK;
 
 /**
  * Clamp rather than throw. A caller passing 10 GiB means "as big as you can",
- * and refusing the transfer over a tuning knob helps nobody.
+ * and refusing the transfer over a tuning knob helps nobody. The clamp is also
+ * what keeps a hostile header from steering the receiver past the ceiling.
  */
 function clampChunkSize(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_CHUNK;
@@ -99,6 +165,21 @@ function clampChunkSize(value) {
   if (n < MIN_CHUNK) return MIN_CHUNK;
   if (n > MAX_CHUNK) return MAX_CHUNK;
   return n;
+}
+
+/**
+ * Last line of defence before the encoder. clampChunkSize already makes this
+ * unreachable for chunks, but "unreachable" is a claim about today's call
+ * graph, and the failure it prevents is a RangeError with no context raised
+ * from inside a library the user did not write.
+ */
+function assertWireCeiling(length, what) {
+  if (length > WIRE_MAX_PLAINTEXT) {
+    throw new Error(
+      `${what} is ${length} plaintext bytes, over the ${WIRE_MAX_PLAINTEXT} byte ceiling one ` +
+        `OCX1 frame can carry. Lower --chunk, or wait for the u32 envelope fields`,
+    );
+  }
 }
 
 function sha256Hex(bytes) {
@@ -149,7 +230,7 @@ function pairWords(self, peer) {
  * failed tag is either corruption or an attacker.
  */
 const REASONS = {
-  malformed_token: 'the peer sent something that is not a ratchet-ts token, so the other end is not speaking this protocol',
+  malformed_token: 'the peer sent something that is not a ratchet-ts envelope, so the other end is not speaking this protocol',
   unknown_version: 'the peer is running an incompatible ratchet-ts version, so upgrade one side',
   no_session: 'no live session for that frame, so the two sides fell out of step in the handshake',
   authentication_failed: 'the data was tampered with in transit, or the peer is not who it claims to be. Nothing was written',
@@ -171,6 +252,9 @@ function wrapCrypto(err, during) {
  * Run one crypto call, charging its duration to `clock` and nothing else.
  * cryptoMs minus socket time is the whole point of the split: the gap between
  * cryptoMs and wallMs is the honest answer to network bound or crypto bound.
+ *
+ * Only seal and open go through here. Envelope packaging does not, so the
+ * figure stays comparable across a change to how frames are encoded.
  */
 async function timed(clock, during, fn) {
   const start = performance.now();
@@ -183,18 +267,64 @@ async function timed(clock, during, fn) {
   }
 }
 
-/** A closed channel mid-transfer is a distinct failure from a crypto one. */
-async function expectFrame(channel, what) {
-  const line = await channel.next();
-  if (line === null || line === undefined) {
-    throw new Error(`connection closed while waiting for ${what}`);
+/**
+ * Engine token to wire bytes.
+ *
+ * The engine's public surface speaks OCX1 tokens, so getting to the binary
+ * form means decoding the token back into the envelope it already was. That is
+ * packaging, not crypto, which is why it is outside timed(): charging it to
+ * cryptoMs would inflate the one number people quote.
+ */
+function toWire(token, what) {
+  try {
+    return encodeEnvelopeBytes(decodeEnvelope(token));
+  } catch (err) {
+    throw wrapCrypto(err, `encoding ${what}`);
   }
-  return line;
 }
 
-/** Frame bodies are ASCII base64url plus dots, so length is byte length. */
-function frameBytes(token) {
-  return Buffer.byteLength(token, 'utf8');
+/**
+ * Wire bytes to engine token. Self describing, so no hint about which kind of
+ * envelope is arriving: a receiver cannot know whether the next frame is an
+ * invite, an accept or a message, and guessing wrong used to be a decode error
+ * rather than a protocol error.
+ */
+function fromWire(bytes, what) {
+  try {
+    return encodeEnvelope(decodeEnvelopeBytes(bytes));
+  } catch (err) {
+    throw wrapCrypto(err, `decoding ${what}`);
+  }
+}
+
+/** Real cost of putting one frame on the socket, prefix included. */
+function wireCost(frame) {
+  return FRAME_PREFIX_BYTES + frame.length;
+}
+
+/**
+ * A closed channel mid-transfer is a distinct failure from a crypto one.
+ *
+ * receive() is the binary channel's read. next() is the same call under the
+ * name the newline delimited transport used, accepted so this file does not
+ * break on a transport that has not been renamed yet.
+ */
+async function expectFrame(channel, what) {
+  const frame = typeof channel.receive === 'function'
+    ? await channel.receive()
+    : await channel.next();
+  if (frame === null || frame === undefined) {
+    throw new Error(`connection closed while waiting for ${what}`);
+  }
+  // A string here means the channel is still the text transport, and feeding
+  // that to the binary decoder produces a confusing failure several layers
+  // down. Say what is actually wrong instead.
+  if (!(frame instanceof Uint8Array)) {
+    throw new Error(
+      `the channel delivered ${typeof frame} for ${what}, but this protocol reads binary frames`,
+    );
+  }
+  return frame;
 }
 
 /**
@@ -256,21 +386,24 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
   const payload = bytes ?? new Uint8Array(0);
   const size = payload.length;
   const chunk = clampChunkSize(chunkSize);
+  assertWireCeiling(chunk, 'the requested chunk size');
   const chunks = expectedChunks(size, chunk);
   const clock = { ms: 0 };
 
   const handshakeStart = performance.now();
 
-  const invite = await expectFrame(channel, 'the peer invite');
+  const inviteFrame = await expectFrame(channel, 'the peer invite');
+  const invite = fromWire(inviteFrame, 'the peer invite');
   let opened = await timed(clock, 'opening the peer invite', () => engine.open(identity, invite, {}));
   if (opened.outcome !== 'invite') {
     throw new Error(`expected an invite from the receiver, got ${opened.outcome}`);
   }
   let session = opened.session;
-  await channel.send(opened.reply);
+  await channel.send(toWire(opened.reply, 'the accept'));
 
   // The receiver speaks once here so this side gets a send chain. See step 3b.
-  const ready = await expectFrame(channel, 'the receiver ready frame');
+  const readyFrame = await expectFrame(channel, 'the receiver ready frame');
+  const ready = fromWire(readyFrame, 'the receiver ready frame');
   const readyOpen = await timed(clock, 'opening the receiver ready frame', () =>
     engine.open(identity, ready, { session }),
   );
@@ -297,14 +430,18 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
     chunks,
     chunkSize: chunk,
   });
+  // The peer picks the filename length, and a long enough name is the one way
+  // a caller could push this JSON past a single frame.
+  assertWireCeiling(Buffer.byteLength(header, 'utf8'), 'the payload header');
 
   let wireBytes = 0;
   const wallStart = performance.now();
 
   const sealedHeader = await timed(clock, 'sealing the header', () => engine.seal(session, header));
   session = sealedHeader.session;
-  wireBytes += frameBytes(sealedHeader.token);
-  await channel.send(sealedHeader.token);
+  const headerFrame = toWire(sealedHeader.token, 'the header');
+  wireBytes += wireCost(headerFrame);
+  await channel.send(headerFrame);
 
   report(onProgress, 0, size);
   let done = 0;
@@ -315,15 +452,19 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
       engine.sealBytes(session, slice),
     );
     session = sealed.session;
-    wireBytes += frameBytes(sealed.token);
-    await channel.send(sealed.token);
+    const frame = toWire(sealed.token, `chunk ${i + 1} of ${chunks}`);
+    wireBytes += wireCost(frame);
+    // Awaited for backpressure only, not for a reply. The receiver is opening
+    // chunk i while this loop is sealing chunk i + 1, which is the pipelining.
+    await channel.send(frame);
     done += slice.length;
     report(onProgress, done, size);
   }
 
   const ackFrame = await expectFrame(channel, 'the receiver acknowledgement');
+  const ackToken = fromWire(ackFrame, 'the receiver acknowledgement');
   const ack = await timed(clock, 'opening the acknowledgement', () =>
-    engine.open(identity, ackFrame, { session }),
+    engine.open(identity, ackToken, { session }),
   );
   if (ack.outcome !== 'message') {
     throw new Error(`expected an acknowledgement, got ${ack.outcome}`);
@@ -351,6 +492,7 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
     chunkSize: chunk,
     sha256,
     throughputMBs: throughput(size, wallMs),
+    backend: aeadBackend(),
     peerWords,
     sessionWords,
   };
@@ -367,11 +509,12 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   const handshakeStart = performance.now();
 
   const invited = await timed(clock, 'creating the invite', () => engine.invite(identity));
-  await channel.send(invited.token);
+  await channel.send(toWire(invited.token, 'the invite'));
 
   const replyFrame = await expectFrame(channel, 'the sender reply');
+  const reply = fromWire(replyFrame, 'the sender reply');
   const accepted = await timed(clock, 'opening the sender reply', () =>
-    engine.open(identity, replyFrame, { pending: invited.pending }),
+    engine.open(identity, reply, { pending: invited.pending }),
   );
   if (accepted.outcome !== 'accepted') {
     throw new Error(`expected an accept from the sender, got ${accepted.outcome}`);
@@ -382,7 +525,7 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
     engine.seal(session, JSON.stringify({ v: PROTOCOL_VERSION, ready: true })),
   );
   session = ready.session;
-  await channel.send(ready.token);
+  await channel.send(toWire(ready.token, 'the ready frame'));
 
   const handshakeMs = performance.now() - handshakeStart;
   const peerWords = formatFingerprint(fingerprint(session.peer));
@@ -395,9 +538,10 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   const wallStart = performance.now();
 
   const headerFrame = await expectFrame(channel, 'the payload header');
-  wireBytes += frameBytes(headerFrame);
+  wireBytes += wireCost(headerFrame);
+  const headerToken = fromWire(headerFrame, 'the payload header');
   const headerOpen = await timed(clock, 'opening the header', () =>
-    engine.open(identity, headerFrame, { session }),
+    engine.open(identity, headerToken, { session }),
   );
   if (headerOpen.outcome !== 'message') {
     throw new Error(`expected a payload header, got ${headerOpen.outcome}`);
@@ -427,9 +571,10 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   let done = 0;
   for (let i = 0; i < chunks; i += 1) {
     const frame = await expectFrame(channel, `chunk ${i + 1} of ${chunks}`);
-    wireBytes += frameBytes(frame);
+    wireBytes += wireCost(frame);
+    const token = fromWire(frame, `chunk ${i + 1} of ${chunks}`);
     const chunk = await timed(clock, `opening chunk ${i + 1} of ${chunks}`, () =>
-      engine.openBytes(session, frame),
+      engine.openBytes(session, token),
     );
     session = chunk.session;
     if (done + chunk.plaintext.length > header.size) {
@@ -457,7 +602,7 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
     engine.seal(session, JSON.stringify({ ok: true, sha256 })),
   );
   session = ack.session;
-  await channel.send(ack.token);
+  await channel.send(toWire(ack.token, 'the acknowledgement'));
   const wallMs = performance.now() - wallStart;
 
   return {
@@ -473,6 +618,7 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
       chunkSize,
       sha256,
       throughputMBs: throughput(header.size, wallMs),
+      backend: aeadBackend(),
       peerWords,
       sessionWords,
     },
