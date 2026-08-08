@@ -1375,6 +1375,19 @@ async function cmdChat(opts, rest) {
   }
 
   const trust = await openTrust(address);
+  const banner = handshakeBanner(trust);
+
+  // The chat screen needs the trust verdict as data, not as printed lines, and
+  // openTrust keeps its store private. There must be exactly one classifier and
+  // it lives in cli/peers.mjs, so this asks that same function rather than
+  // growing a second opinion. This copy is never written to, which also makes
+  // it the pre-sighting view classification has to be made against.
+  let peerStore = null;
+  try {
+    peerStore = await loadPeers();
+  } catch {
+    peerStore = null;
+  }
 
   try {
     const result = await runChat({
@@ -1382,7 +1395,15 @@ async function cmdChat(opts, rest) {
       identity,
       stdin: process.stdin,
       stdout: out,
-      onHandshake: handshakeBanner(trust),
+      onHandshake: (info) => {
+        banner(info);
+        if (!peerStore || !info.peerHex) return null;
+        try {
+          return classifyPeer(peerStore, { hex: info.peerHex, address });
+        } catch {
+          return null;
+        }
+      },
       // The seam for /verify. runChat owns the question and the answer, this
       // owns the disk, and neither has to know how the other works.
       onVerify: ({ label }) => trust.verify(label),

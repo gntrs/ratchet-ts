@@ -17,6 +17,24 @@ Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 > Fine for learning, prototyping, internal tools, and anywhere MIT is a hard
 > requirement and you can accept the gap. On 0.x the wire format and API can move.
 
+> **This README is a lab notebook, on purpose.** It logs the whole process, not
+> just the result: the method behind every number, the numbers that turned out
+> to be wrong, and how each one was caught. A benchmark that measured a dead
+> base64 path for months, an 11x speedup that was really 1.4x, a machine chart
+> that overstated one row by 4x, all of it stays in, because the correction is
+> the more useful half. That makes it long. It is meant to be long right now and
+> it will be cut down to a short reference once the numbers stop moving.
+> [CHANGELOG.md](./CHANGELOG.md) is the terse view: what changed, what the new
+> number is, nothing else.
+>
+> Every latency claim below carries the machine, the runtime, the backend state,
+> the payload size and whether it is a p50, a p99 or a median of runs. There is
+> no p50 anywhere without its p99 next to it. **The canonical payload is 256
+> bytes**, which is this project's working estimate of a real chat message. It
+> is a choice rather than a discovery, and it barely matters: latency is flat
+> below about 1 kB, and moving the payload from 200 B to 256 B moved the seal by
+> less than the run-to-run noise (see the sweep below).
+
 ## Why
 
 `libsignal` is the reference, and it is AGPL/GPL, so you cannot use it inside a
@@ -173,28 +191,34 @@ something else, and `ratchet id` to see this machine's own words.
 Two measurements, because they answer different questions. Loopback tells you
 what the library costs. A real link tells you what a person waits.
 
-**Loopback**, 763.5 kB file, one machine, Ryzen 5 7530U, Node 25, Windows 11,
-native AEAD, 0.3.1, medians of 21 transfers:
+**Loopback**, 10.5 MB file, two real `ratchet send` and `ratchet recv`
+processes on one machine, AMD Ryzen 5 7530U, Node v25.8.0, Windows 11, all
+three backends native. Published 0.3.2 installed from its tarball against
+0.3.4, arms interleaved inside each repeat, wire bytes and payload SHA-256
+identical across every run:
 
-| | sender | receiver |
+| | 0.3.2 | 0.3.4 |
 |---|---|---|
-| plaintext | 763.5 kB | 763.5 kB |
-| on the wire | 765.3 kB | 765.3 kB |
-| overhead | 1.8 kB (0.2%) | 1.8 kB (0.2%) |
-| chunks | 12 x 65.5 kB | 12 x 65.5 kB |
-| handshake | 45.8 ms | 36.6 ms |
-| crypto | 31.5 ms | 28.3 ms |
-| wall time | 18.7 ms | 22.5 ms |
-| throughput | 40.9 MB/s | 33.9 MB/s |
+| sender throughput | 56.48 MB/s | 79.98 MB/s |
+| receiver throughput | 50.31 MB/s | 69.22 MB/s |
+| wire overhead, 65519 B chunks | 0.2% | 0.2% |
 
-Wall time sits under crypto time because the two measure different spans:
-`crypto` is every seal and open including the handshake, `wall` is the payload
-transfer alone. Both sides print the SHA-256 of what they hashed, and that is
-the row worth checking before you trust any of the others.
+The gain is roughly 1.4x and it is the native curve and hash backends plus the
+copy removal in 0.3.3. It is not the 11x you get by comparing against the
+figure this project published for 0.3.1 and 0.3.2, because that figure came
+from a benchmark measuring a code path the CLI stopped using in 0.3.1. That is
+written up in [bench/README.md](./bench/README.md), which opens by saying so.
 
-**A real link**, same file, a Windows laptop and a Linux box on a mesh VPN that
-was relaying through a public relay instead of going direct. Close to the worst
-realistic path: every packet crosses the internet twice.
+The byte rows are exact rather than measured. Every chunk pays a constant 122
+bytes of envelope whatever it carries, so a 10.5 MB transfer in 65519 byte
+chunks pays 0.19% for the envelopes and the rest of the 0.2% is the handshake
+and the framing. Both sides print the SHA-256 of what they hashed, and that is
+the line worth checking before you trust any of the others.
+
+**A real link**, a 763.5 kB file, a Windows laptop and a Linux box on a mesh VPN
+that was relaying through a public relay instead of going direct. Close to the
+worst realistic path: every packet crosses the internet twice. Older versions,
+and not re-run since:
 
 | | 0.2.1 | 0.3.0 | delta |
 |---|---|---|---|
@@ -208,9 +232,9 @@ The hash matched on both sides both times, so that is the same file arriving
 intact rather than a faster route to a different answer.
 
 Read the two tables differently. The byte rows are exact and reproduce to the
-byte against the published tarballs. The loopback millisecond rows are medians
-of 21 runs. The real link rows are one run each, so 16.5% is the right order of
-magnitude and not a number to quote to three digits.
+byte against the published tarballs. The loopback rows are medians of
+interleaved repeats on an idle machine. The real link rows are one run each, so
+16.5% is the right order of magnitude and not a number to quote to three digits.
 
 The prediction for 0.3.1 on that link was that it changes CPU only, so on a
 3 MB/s relay it would move the `crypto` row and very little else. That has now
@@ -231,7 +255,10 @@ rest belongs to the network.
 ### 0.3.0 to 0.3.1
 
 Same bytes on the wire, about three times faster. Both versions installed from
-their published tarballs, same file, medians of 21 transfers:
+their published tarballs, 763.5 kB file, loopback, AMD Ryzen 5 7530U, Node 25,
+Windows 11, medians of 21 transfers. Kept here because it is the release that
+moved, not because it is the current number: 0.3.4 on this machine does 79.98
+MB/s sending, on a larger file, in the table above.
 
 | | 0.3.0 | 0.3.1 | |
 |---|---|---|---|
@@ -629,7 +656,7 @@ a wrong error is a failing test.
 
 Plus envelope round-trips across all three token kinds, deterministic
 fingerprints, out-of-order delivery across ratchet turns, and identity-mismatch
-handling. 115 tests, `.ts` and `.mjs`.
+handling. 179 tests, `.ts` and `.mjs`: 178 pass and 1 is skipped.
 
 ```sh
 npm install && npm test && npm run typecheck && npm run build
@@ -641,53 +668,318 @@ npm install && npm test && npm run typecheck && npm run build
 npm run bench
 ```
 
-Single thread, no tuning. `--runs N` repeats the whole bench and reports the spread across runs. Eight runs on seven machines so far, medians:
+Single thread, no tuning. `--runs N` repeats the whole bench and reports the
+spread across runs.
+
+### Per message, 0.3.4
+
+All of the following is one machine: AMD Ryzen 5 7530U laptop, Node v25.8.0,
+Windows 11, single thread, all three backends confirmed `native` before the
+first timer starts. The harness prints `aeadBackend()`, `curveBackend()` and
+`hashBackend()` and refuses to measure unless all three say `native`. 4000
+iterations after 500 warmup, three repeats inside a process, three separate
+processes, so every median below is a median of nine repeats and the band is
+the full spread across those nine. A number measured anywhere else is a
+different number, which is why the machine is written next to it.
+
+**The canonical payload is 256 bytes.** It is this project's working estimate
+of a real chat message, and because latency is flat below about 1 kB (see the
+sweep) the choice barely moves the number. The previous canonical size here was
+200 B; running 200 B and 256 B as two arms of one interleaved loop moves seal
+by 0.0 us and open by 0.1 us, which is inside the noise band of either.
+
+256 byte payload, seal and open measured on separate session pairs, because
+thousands of seals with no reply walks the receiving side into `MAX_SKIP`:
+
+| | p50 | p99 | min |
+|---|---|---|---|
+| `sealToEnvelopeBytes` | 20.1 us | 55.2 us | 17.3 us |
+| `openFromEnvelopeBytes` | 18.0 us | 38.2 us | 15.1 us |
+| round trip (sum of p50s) | 38.1 us | not additive | 32.4 us |
+
+Bands across the nine repeats: seal p50 18.8 to 21.1 us, seal p99 43.6 to 60.2
+us, open p50 17.6 to 18.4 us, open p99 33.1 to 47.9 us. Read the p50 to two
+significant figures and no further.
+
+Those rows are the synchronous core, `ratchetEncryptToEnvelopeBytes` and
+`ratchetDecryptFromEnvelopeBytes`. The public `engine.sealToEnvelopeBytes` is
+an `async` wrapper around it; measured as one arm against the sync call in the
+same interleaved loop, 256 B, it is 22.1 us p50 against 21.2 us p50, so the
+`await` costs about 0.9 us, 4% of a seal. Add that if you call through the
+engine, which you should, because the wrapper is what lets the AEAD backend
+resolve.
+
+The p99 is 2 to 3x the p50 and that is not noise to be averaged away. It is V8
+allocating: a seal allocates about ten short lived objects and buffers, and
+every so often one call pays for a young generation collection. If you are
+sizing a queue, size it against the p99.
+
+Across sizes, same machine, all sizes stepped as arms of one interleaved loop
+so the rows are comparable to each other even if the clock drifts mid-run:
+
+| payload | envelope | `seal` p50 | `seal` p99 | `open` p50 | `open` p99 |
+|---|---|---|---|---|---|
+| 20 B | 142 B | 18.1 us | 48.0 us | 18.1 us | 48.1 us |
+| 100 B | 222 B | 18.4 us | 48.8 us | 18.3 us | 46.5 us |
+| **256 B** | **378 B** | **18.7 us** | **49.1 us** | **18.3 us** | **45.2 us** |
+| 1000 B | 1122 B | 19.2 us | 50.2 us | 18.7 us | 46.9 us |
+| 4000 B | 4122 B | 21.1 us | 74.2 us | 20.3 us | 48.5 us |
+
+Compare rows of this table against each other, not against the headline table
+above it. The whole sweep sits about 1.4 us below the solo headline because
+interleaving six arms keeps more of the machine hot; that offset applies to
+every row equally and is exactly why the sizes are measured this way.
+
+Read the flatness rather than the numbers. Envelope overhead is a constant 122
+bytes at every size, and a 200x increase in payload costs 17% more time. Below
+about 1 kB this library's per message cost is fixed cost: a chain step, a
+nonce, an AEAD call on a short buffer, and the object churn around them. The
+bytes are nearly free and the call is not. That also means batching small
+messages helps and splitting large ones does not. It is also the reason the
+canonical size is a judgement call rather than a measurement: anything from a
+one word reply to a full paragraph lands on the same number.
+
+### Where the fixed cost goes
+
+Same machine, 256 B, medians of nine repeats of 4000 iterations, each stage
+timed in place with `performance.now()` around it.
+
+**Read the method before the numbers, because this is the weakest measurement
+on the page.** The stages are produced by importing the real `src/*.ts` modules
+and calling the same exported functions in the same order the shipped code
+calls them: `kdfChain`, `randomBytes`, `messageAad`, `sealAeadSync`,
+`encodeEnvelopeBytes` on the seal side, and `decodeEnvelopeBytes`, `skipKeyId`
+plus the map lookup, `kdfChain`, `messageAad`, `openAeadSync` on the open side.
+The pieces that are **not** exported, `draftOf`, `commit`, the header object
+literal and the session spread, are transcribed by hand out of
+[`src/ratchet.ts`](./src/ratchet.ts) into the harness. That row is a copy, not
+the shipped code, and if `src/ratchet.ts` changes without the harness changing,
+that row silently lies. It is the "everything else" line in both tables and it
+is the line to distrust first.
+
+Timer overhead on this machine is **0.058 us per `performance.now()` call**,
+median across seven runs, band 0.05 to 0.06. It is **not** subtracted from
+anything below. The seal table carries eleven timer calls and the open table
+carries eighteen, so roughly 0.6 us and 1.0 us of each sum is the timer itself.
+
+Seal, 256 B:
+
+| stage | p50 | share |
+|---|---|---|
+| `sealAeadSync`, XChaCha20-Poly1305 | 7.9 us | 37% |
+| `kdfChain`, two HMAC-SHA256 | 6.4 us | 30% |
+| `randomBytes(24)` nonce | 2.6 us | 12% |
+| `messageAad` build | 2.0 us | 9% |
+| `encodeEnvelopeBytes` | 1.7 us | 8% |
+| everything else: guards, header literal, `wipe`, session spread (transcribed) | 1.0 us | 5% |
+| **sum of stages** | **21.6 us** | |
+
+Open, 256 B:
+
+| stage | p50 | share |
+|---|---|---|
+| `openAeadSync`, XChaCha20-Poly1305 | 7.5 us | 38% |
+| `kdfChain`, two HMAC-SHA256 | 6.5 us | 33% |
+| `messageAad` rebuild | 1.9 us | 10% |
+| `skipKeyId` + skipped-map lookup | 1.8 us | 9% |
+| `decodeEnvelopeBytes`, borrowed ciphertext | 1.3 us | 7% |
+| everything else: checks, `draftOf`, `commit`, `wipe` (transcribed) | 0.5 us | 3% |
+| **sum of stages** | **19.5 us** | |
+
+The check that decides whether these tables get published: the instrumented
+path and the whole uninstrumented function are stepped **alternately in the
+same loop**, on two separate sessions, so a clock change hits both. Against
+that control the seal sum of 21.6 us stands against an uninstrumented whole of
+20.6 us, an overshoot of **4.9%**. The open sum of 19.5 us stands against 18.8
+us, an overshoot of **3.7%**. Both are under the 15% line at which these tables
+would have been withheld instead of printed, and both are roughly the size of
+the timer calls the tables carry, so nothing large is hiding in the gap.
+
+Note also that the uninstrumented seal is 20.6 us in this section and 20.1 us
+at the top of the page, and the whole sweep is lower again. Run to run on a
+laptop that is not a benchmark rig, these numbers move a microsecond. No
+reading of them should turn on 1 us.
+
+Three things worth saying out loud:
+
+- **The AEAD is the largest line on both sides, and about 1 us of its 7.7 is
+  JavaScript.** XChaCha20 derives a subkey with HChaCha20 in JS and only then
+  hands a 12 byte nonce construction to OpenSSL.
+- **The chain step is two HMAC-SHA256 calls and stays two.** One HMAC-SHA512
+  split in half would cost about a third of this and would also be a different
+  protocol. See [`src/kdf.ts`](./src/kdf.ts).
+- **Open pays 1.8 us to build a skipped-key lookup string on every message**,
+  which base64s the 32 byte ratchet public key whether or not anything was ever
+  skipped. That is 9% of an open spent asking a usually empty map a question.
+
+### Against the Signal construction
+
+Same machine, same runtime, same 256 byte payload, `node:crypto` on both sides,
+crypto primitives only with no session or envelope work. Both constructions are
+stepped as arms of one interleaved loop, so the ratio is not an artefact of two
+processes running at two clock speeds.
+
+The Signal shape is: chain step HMAC-SHA256 twice, then HKDF-SHA256 from the
+message key out to 80 bytes (encryption key, IV, MAC key), then AES-256-CBC,
+then HMAC-SHA256 over the ciphertext truncated to 8 bytes. The 0.3.4 shape is:
+chain step HMAC-SHA256 twice, then XChaCha20-Poly1305.
+
+| | p50 | p99 |
+|---|---|---|
+| Signal Double Ratchet shape | 26.7 us | 73.4 us |
+| ratchet-ts 0.3.4 shape | 13.6 us | 44.1 us |
+
+**26.7 us against 13.6 us, so 1.98x less CPU work at p50.** At p99 it is 1.63x,
+and the p99 ratio wanders between 1.45x and 2.01x across repeats, so the p50
+ratio is the one to quote. The p50 ratio itself sat between 1.96x and 1.99x
+across all nine repeats.
+
+Now the qualifiers, and they are not optional. All four travel with this
+comparison every time it is repeated:
+
+- This is **construction against construction, not implementation against
+  implementation**. It measures what the two designs ask a CPU to do.
+- It does **not** measure libsignal, which is Rust, and which would be faster
+  than this library at either construction.
+- It is **CPU only**. It excludes network, storage, serialisation, and the
+  handshake.
+- It says **nothing whatsoever** about how fast any deployed messenger feels.
+  Network round trip time is three to four orders of magnitude larger than
+  every number on this page. Nobody has ever noticed 13 microseconds.
+
+What it does tell you is which construction you would pick if you were writing
+one today, and that an encrypt-then-MAC pair from 2013 costs more than a modern
+AEAD.
+
+Note for anyone comparing this against an earlier draft of this file: a
+previous pass put a 2.21x here, measured against ChaCha20-Poly1305 with a 12
+byte IETF nonce. That is not what 0.3.4 ships. 0.3.4 ships XChaCha20-Poly1305
+with a 24 byte nonce, which pays for an extra HChaCha20 subkey derivation in
+JavaScript. The IETF variant does measure 10.7 us p50 here, a 2.50x ratio, but
+quoting it would be quoting a build nobody runs. The shipped number is 1.98x.
+
+### Handshake
+
+Once per conversation, same machine and method, 400 iterations per repeat:
+
+| | p50 | p99 |
+|---|---|---|
+| `createIdentity`, X25519 + ML-KEM-768 keygen | 0.484 ms | 0.992 ms |
+| full key exchange, invite + accept + complete | 1.851 ms | 3.045 ms |
+
+Bands across nine repeats: `createIdentity` p50 0.48 to 0.52 ms, exchange p50
+1.82 to 1.99 ms.
+
+An invite token is 1684 characters and an accept token is 3183, both fixed,
+because ML-KEM-768 keys and ciphertexts are fixed size. The handshake is about
+90x a 256 B message and you pay it once, so a conversation of 90 messages is
+already handshake-minority.
+
+### Backends, and how to check yours
+
+Three independent native probes, one per primitive:
+
+```js
+import {
+  aeadBackend, aeadReady,
+  curveBackend, curvesReady,
+  hashBackend, hashReady,
+} from 'ratchet-ts';
+
+await Promise.all([aeadReady(), curvesReady(), hashReady()]);
+console.log(aeadBackend(), curveBackend(), hashBackend());
+// node with OpenSSL: native native native
+```
+
+Every number on this page is a `native native native` number. Each probe falls
+back to [@noble](https://github.com/paulmillr/noble-hashes) independently and
+silently if its primitive is missing or behaves wrong, which is correct for
+portability and expensive for speed: the pure JavaScript path is materially
+slower, and the handshake in particular was 4x slower before the native curve
+backend landed in 0.3.3. If your numbers look nothing like these, print those
+three strings first. It is the fastest question to answer.
+
+### Across machines, and why this chart is honest about being broken
+
+Eight runs on seven machines, and **only one of them is a 0.3.4 number.** I own
+exactly one of these eight boxes. The other seven were run by other people on
+0.1.0 and 0.2.0, before the native curve and hash backends landed in 0.3.3, and
+I cannot re-measure them. So the chart draws the mixed vintage instead of
+hiding it: the measured row is solid, the seven inherited rows are hatched, and
+the legend says which is which. A hatched bar is a number from a different
+version of this library and is not comparable to the solid one.
+
+The size of the lie, measured: the 7530U row said **7.6 ms** on 0.2.0. The same
+laptop on 0.3.4 does **1.85 ms**. The inherited handshake column overstates by
+roughly **4x**. The inherited `seal` column is wrong by an amount I cannot
+state, because those runs did not record their payload size.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake median ms per machine: Apple M1 6.2, i5-12500H 6.5, i5-12450H 7.0, Ryzen 7 5800X3D 7.3, Ryzen 5 7530U 7.6, EPYC 9354P 8.9, i5-10400F on WSL 10.9, same i5-10400F on Windows 11.5. Lower is better." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 1.85 (v0.3.4, measured), Apple M1 6.20 (v0.1.0, pre-0.3.3), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3). Only the Ryzen 5 7530U row is measured on 0.3.4; the rest predate the native curve and hash backends added in 0.3.3. The same laptop measured 7.6 ms on 0.2.0 and 1.85 ms on 0.3.4, so the inherited rows overstate the handshake by roughly 4x." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal of a 256 byte message, median ms per machine: Apple M1 0.019, i5-12500H 0.025, i5-12450H 0.023, Ryzen 7 5800X3D 0.028, Ryzen 5 7530U 0.031, EPYC 9354P 0.050, i5-10400F on WSL 0.053, same i5-10400F on Windows 0.042. Lower is better." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M1 0.0190 (v0.1.0, pre-0.3.3), Ryzen 5 7530U 0.0201 (v0.3.4, measured), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3). Only the Ryzen 5 7530U row is measured on 0.3.4; the rest predate the native curve and hash backends added in 0.3.3. The inherited rows did not record their payload size, so they are not directly comparable to the 256 B measured row." width="760">
 </picture>
 
-| Machine | Node | Handshake | `seal` 256 B | `open` 256 B |
-|---|---|---|---|---|
-| Apple M1 (laptop 2020, macOS) | | 6.2 ms | 0.019 ms | 0.021 ms |
-| Core i5-12500H (laptop 2022) | 24 | 6.5 ms | 0.025 ms | 0.026 ms |
-| Core i5-12450H (laptop 2022) | 24 | 7.0 ms | 0.023 ms | 0.025 ms |
-| Ryzen 7 5800X3D (desktop) | 24 | 7.3 ms | 0.028 ms | 0.031 ms |
-| Ryzen 5 7530U (laptop) | 25 | 7.6 ms | 0.031 ms | 0.033 ms |
-| EPYC 9354P 32-core (VPS, Linux) | 22 | 8.9 ms | 0.050 ms | 0.051 ms |
-| Core i5-10400F (desktop 2020, WSL) | 22 | 10.9 ms | 0.053 ms | 0.057 ms |
-| Core i5-10400F (same box, Windows) | 24 | 11.5 ms | 0.042 ms | 0.044 ms |
+| Machine | Node | Version | Handshake | `seal` | `open` |
+|---|---|---|---|---|---|
+| **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.3.4, measured 2026-08-08** | **1.85 ms** | **0.0201 ms** | **0.0180 ms** |
+| Apple M1 (laptop 2020, macOS) | not recorded | 0.1.0, inherited | 6.2 ms | 0.019 ms | not recorded |
+| Core i5-12500H (laptop 2022) | 24 | 0.2.0, inherited | 6.5 ms | 0.025 ms | not recorded |
+| Core i5-12450H (laptop 2022) | 24 | 0.2.0, inherited | 7.0 ms | 0.023 ms | not recorded |
+| Ryzen 7 5800X3D (desktop) | 24 | 0.2.0, inherited | 7.3 ms | 0.028 ms | not recorded |
+| EPYC 9354P 32-core (VPS, Linux) | 22 | 0.2.0, inherited | 8.9 ms | 0.050 ms | not recorded |
+| Core i5-10400F (desktop 2020, WSL) | 22 | 0.2.0, inherited | 10.9 ms | 0.053 ms | not recorded |
+| Core i5-10400F (same box, Windows) | 24 | 0.2.0, inherited | 11.5 ms | 0.042 ms | not recorded |
 
-The handshake is the expensive step: one ML-KEM-768 encapsulation and decapsulation plus two X25519 exchanges, once per conversation. After that a message is one symmetric ratchet step and one XChaCha20-Poly1305 seal, which is why `seal` and `open` sit under 0.1 ms everywhere. Token overhead for a 256 byte message is **+259 bytes** (ratchet header + AEAD tag + framing) on every machine, because it is protocol math, not hardware. That 259 is not a constant: the body is base64url, so a third of it scales with the plaintext, and a 65519 byte message pays 22013 bytes. The binary envelope overhead **is** constant, 122 bytes at any size, which is where the CLI numbers below come from.
+The measured row is the 256 B payload, 4000 iterations, 500 warmup, median of
+nine process runs, all three backends `native`. The inherited rows are whatever
+`npm run bench` did at the time on someone else's machine, and their `open`
+column has been deleted rather than carried forward: the old table printed an
+`open` for every machine, but those values were never separately measured and
+had no provenance, so they are gone. Deleting a number is cheaper than
+defending one.
 
-The bench is single-core bound, so a newer core beats a bigger machine. The fastest row is a 2020 ultrabook: the M1 tops every column, and the 2022 laptop chip behind it still outruns the 5800X3D desktop, while a 32-core EPYC server lands mid-table. Core count buys concurrent sessions, not a faster handshake. The M1 run did not record its Node version, and it was measured on 0.1.0, before the byte-first ratchet rewrite in 0.2.0.
+**What the inherited rows are still good for.** The shape across machines is a
+real finding and it does not depend on the absolute values, because every
+inherited row was measured the same wrong way. The bench is single-core bound,
+so a newer core beats a bigger machine: the fastest inherited row is a 2020
+ultrabook, the M1 tops the column, the 2022 laptop chip behind it still outruns
+a 5800X3D desktop, and a 32-core EPYC server lands mid-table. Core count buys
+concurrent sessions, not a faster handshake.
 
 The two 12th generation Intel rows are different chips, not one box measured twice: twelve cores on the 12500H against eight on the 12450H. The 12450H handshake is 8 percent slower and its `seal` 8 percent faster, and the run that produced it spread 2.4 percent on handshake and 9.6 percent on `seal` across three runs. A gap smaller than the spread of the run it came from is not a result, so at this workload the two chips are the same speed, and the core count again bought nothing.
 
 The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. For scale, three back-to-back runs on the idle VPS varied by 3.3 percent on both handshake and `seal`, so single-digit gaps are run-to-run noise and only the larger one is worth a second look. `keygen` on that same VPS spread 33 percent across the three runs, which is what a noisy neighbour on shared hardware looks like and the reason `--runs` prints the spread at all.
 
-The 7530U row is a correction. It first went in the table at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it is 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. A bench number is only as good as the machine was quiet, so `--runs` exists and the spread is printed. That row has not been reproduced on 0.3.0: three runs on the same laptop with a normal desktop load read 8.9 ms handshake, 0.041 ms `seal`, 0.046 ms `open`, so treat the row as a floor from a quiet machine rather than what you will see.
+The 7530U row has been wrong twice and this is the third value it has held. It first went in at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it was 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. On 0.3.0 with a normal desktop load it read 8.9 ms handshake, 0.041 ms `seal`, 0.046 ms `open`. On 0.3.4 with native curve and hash backends it is 1.85 ms. Three of those four numbers were in this file at some point as if they were the truth. A bench number is only as good as the machine was quiet and the version it was measured on, which is why the generator now refuses to draw any row that does not carry a version and a date.
 
-The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs); a fixed-iteration CI bench is planned so numbers only move when the code does.
+Protocol overhead is the one column that does not depend on the machine at all. Token overhead for a 256 byte message is **+259 bytes** (ratchet header + AEAD tag + framing) everywhere, because it is protocol math, not hardware, and it re-measures to exactly 259 on 0.3.4. That 259 is not a constant across sizes: the body is base64url, so a third of it scales with the plaintext, and a 65519 byte message pays 22013 bytes. The binary envelope overhead **is** constant, 122 bytes at any size, re-measured on 0.3.4 at 20, 100, 200, 256, 1000 and 4000 bytes, so a 256 byte message is a 378 byte envelope.
+
+The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs), which now throws rather than draw a row missing its `version`, `measuredOn` or `harness` field. A fixed-iteration CI bench is planned so numbers only move when the code does, and so this section stops being a museum.
 
 ### Cost by version
 
 Same machine, same 763.5 kB file, each version installed from its published
 tarball. A blank cell means not measured on that version, not zero:
 
-| | 0.1.0 | 0.2.1 | 0.3.0 | 0.3.1 |
-|---|---|---|---|---|
-| wire overhead | | 33.7% | 0.2% | 0.2% |
-| sender wall, loopback | | | 56.5 ms | 18.7 ms |
-| survives a restart | no | yes | yes | yes |
-| binary payload, no workaround | no | yes | yes | yes |
-| a `ratchet` command | no | yes | yes | yes |
+| | 0.1.0 | 0.2.1 | 0.3.0 | 0.3.1 | 0.3.4 |
+|---|---|---|---|---|---|
+| wire overhead | | 33.7% | 0.2% | 0.2% | 0.2% |
+| sender wall, loopback | | | 56.5 ms | 18.7 ms | |
+| survives a restart | no | yes | yes | yes | yes |
+| binary payload, no workaround | no | yes | yes | yes | yes |
+| a `ratchet` command | no | yes | yes | yes | yes |
+
+The 0.3.4 wire overhead cell is measured, on the 10.5 MB transfer in the table
+further up, and it is 0.2% at 65519 byte chunks exactly as on 0.3.1: nothing in
+0.3.3 or 0.3.4 touched the envelope. The 0.3.4 sender wall cell is blank
+because the 763.5 kB file has not been re-run on this release. The throughput
+comparison that has been run is 0.3.2 against 0.3.4 on a 10.5 MB file, and it
+is 1.4x.
 
 Three separate things moved, one per release, and none of them was the
 cryptography.
@@ -699,7 +991,7 @@ to 1539:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/wire-dark.svg">
-  <img src="bench/charts/wire-light.svg" alt="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 workaround 2227 bytes, 0.2.0 sealBytes 1539 bytes, 31 percent fewer." width="760">
+  <img src="bench/charts/wire-light.svg" alt="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 string workaround 2227 bytes, 0.2.0 sealBytes, native Uint8Array 1539 bytes, 31 percent fewer. Exact byte counts, not timings, measured against the published tarballs." width="760">
 </picture>
 
 It also made a session survivable. On 0.1.0, `JSON.stringify` on a session
@@ -726,11 +1018,54 @@ across six captures with the backends alternated inside each repeat so neither
 gets the cold cache to itself. At 256 bytes it is a wash, because call overhead
 dominates the cipher.
 
-**The floor.** A 20 byte message costs 415 bytes on the wire, and no version has
-improved that. It is the nonce, the tag, the ratchet public key, the length
-prefixes and a sealed header carrying the filename, and none of it scales down.
-This moves files well and chat lines badly. 0.4.0 is where the floor gets
+**The floor.** A 20 byte file transfer costs 415 bytes on the wire, and no
+version through 0.3.4 has improved that. It re-derives exactly on 0.3.4 and it
+is protocol arithmetic rather than a measurement, so it carries no machine: two
+frames, a sealed header of 143 JSON bytes and a sealed 20 byte chunk, each
+paying the constant 122 byte envelope and a 4 byte length prefix. 122 + 143 + 4
+is 269, 122 + 20 + 4 is 146, and 269 + 146 is 415. It is the nonce, the tag, the
+ratchet public key, the length prefixes and a sealed header carrying the
+filename, and none of it scales down. This moves files well and chat lines
+badly.
+
+A single chat line is cheaper than that, because it pays one frame rather than
+two: 122 bytes of envelope plus 4 of length prefix on top of the text. That is
+still 126 bytes of tax on a 20 byte line. 0.4.0 is where the floor gets
 attacked, because shrinking it changes the wire.
+
+The planned 0.4.0 header is 22 bytes and **is** the AAD, so `messageAad` stops
+existing rather than moving. Today the seal path builds an AAD with a `Writer`
+and then builds an envelope with a second `Writer`: at 256 B those are 1.8 us
+and 1.9 us on this laptop. The 0.4.0 shape writes those same 22 bytes once into
+the output buffer and hands the same array to the AEAD as AAD, which measures
+0.2 us. That is the double serialization gone, by construction rather than by
+tuning.
+
+Both shapes were then modelled end to end in one interleaved loop, alternating
+0.3.4 and 0.4.0 every iteration on the same machine in the same process, so the
+difference between them shares every scheduling artefact instead of being two
+separate runs subtracted. Same machine as everything above, 256 B, all three
+backends `native`, nine process repeats of 4000 iterations.
+
+| | p50 | p99 |
+| --- | --- | --- |
+| model of the 0.3.4 seal | 21.8 us | 69.1 us |
+| model of the 0.4.0 seal | 18.1 us | 57.5 us |
+| paired saving, p50 | **3.5 us** (band 3.0 to 3.7 across nine repeats) | |
+
+Applying that saving to the real measured 0.3.4 seal of 20.1 us p50 projects a
+**256 B 0.4.0 seal at 16.6 us p50 on this laptop, call it 16.4 to 17.1** from
+the saving band alone, or 15.1 to 18.1 if the run-to-run spread of the seal
+itself is also carried through. There is no p99 projection: the p99 here is
+dominated by V8 collection, the model does not reproduce the real allocation
+mix, and projecting a tail from a model is how you get a number nobody can
+reproduce.
+
+**This is a projection, not a measurement, and 0.4.0 does not exist yet.** It
+assumes the chain step and the AEAD are untouched, which together are 67% of a
+seal and are exactly the two lines a wire format change is not allowed to move.
+If 0.4.0 lands outside that range, the interesting question is which of those
+two moved and why.
 
 ```sh
 npm run bench:wire

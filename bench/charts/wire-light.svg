@@ -1,16 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="186" viewBox="0 0 760 186" role="img" aria-label="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 workaround 2227 bytes, 0.2.0 sealBytes 1539 bytes, 31 percent fewer">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="186" viewBox="0 0 760 186" role="img" aria-label="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 string workaround 2227 bytes, 0.2.0 sealBytes, native Uint8Array 1539 bytes, 31 percent fewer. Exact byte counts, not timings, measured against the published tarballs.">
   <rect width="760" height="186" fill="#ffffff"/>
   <text x="16" y="28" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#1f2328">Bytes on the wire, 1 KiB binary payload</text>
-  <text x="16" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#59636e">same machine, same message · lower is better</text>
+  <text x="16" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#59636e">same machine, same message · exact byte counts · lower is better</text>
   <line x1="256" y1="70" x2="256" y2="174" stroke="#d1d9e0" stroke-width="1"/>
 
   <text x="244" y="87" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">0.1.0</text>
   <text x="244" y="103" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">latin1 string workaround</text>
-  <rect x="256" y="78" width="420" height="20" rx="3" fill="#bc4c00"/>
-  <text x="684" y="92" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">2227 B</text>
+  <rect x="256" y="78" width="380" height="20" rx="3" fill="#bc4c00"/>
+  <text x="644" y="92" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">2227 B</text>
 
   <text x="244" y="133" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#1f2328">0.2.0</text>
   <text x="244" y="149" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#59636e">sealBytes, native Uint8Array</text>
-  <rect x="256" y="124" width="290" height="20" rx="3" fill="#1a7f37"/>
-  <text x="554" y="138" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">1539 B  (31% fewer)</text>
+  <rect x="256" y="124" width="263" height="20" rx="3" fill="#1a7f37"/>
+  <text x="527" y="138" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#1f2328">1539 B  (31% fewer)</text>
 </svg>
