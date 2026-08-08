@@ -326,10 +326,18 @@ export interface MessagingEngine {
    * The frame is byte identical to `encodeEnvelopeBytes` of the token
    * `sealBytes` would have produced for the same session and plaintext, so a
    * peer on an older release cannot tell which method the sender used.
+   *
+   * `options.reserve` leaves that many zero bytes in front of the envelope,
+   * inside the same allocation, for a transport that prefixes each frame with
+   * its own length. Filling them in place is the difference between one buffer
+   * per frame and two, and it is the last full-size copy on the send path. The
+   * envelope bytes themselves are unchanged, so the wire is unchanged: the
+   * reserved head is the caller's, and the caller decides what goes in it.
    */
   sealToEnvelopeBytes(
     session: SessionState,
     plaintext: Uint8Array,
+    options?: { readonly reserve?: number },
   ): Promise<{ envelope: EnvelopeBytes; session: SessionState }>;
 
   /**

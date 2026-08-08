@@ -24,6 +24,7 @@ import type {
   SessionState,
 } from './contract.js';
 import { toHex } from './bytes.js';
+import type { EncodeEnvelopeBytesOptions } from './envelope.js';
 import { decodeEnvelope, encodeEnvelope } from './envelope.js';
 import { fail } from './errors.js';
 import { acceptInvite, beginInvite, completeInvite } from './handshake.js';
@@ -94,12 +95,17 @@ async function engineOpenBytes(
  * already binary. `sealBytes` hands back a pasteable token, which such a caller
  * then has to un-base64 straight back into the bytes it already had; this skips
  * that and emits the identical frame directly.
+ *
+ * `options.reserve` asks for N zero bytes in front of the envelope in the same
+ * allocation, for a transport that prefixes a length and would otherwise have
+ * to concatenate. The envelope itself is unchanged and starts at index N.
  */
 async function engineSealToEnvelopeBytes(
   session: SessionState,
   plaintext: Uint8Array,
+  options?: EncodeEnvelopeBytesOptions,
 ): Promise<{ envelope: EnvelopeBytes; session: SessionState }> {
-  return ratchetEncryptToEnvelopeBytes(session, plaintext);
+  return ratchetEncryptToEnvelopeBytes(session, plaintext, options);
 }
 
 /**
@@ -249,6 +255,10 @@ export { ENVELOPE_VERSION, decodeEnvelope, encodeEnvelope } from './envelope.js'
  * spelling of it.
  */
 export { decodeEnvelopeBytes, encodeEnvelopeBytes } from './envelope.js';
+export type {
+  DecodeEnvelopeBytesOptions,
+  EncodeEnvelopeBytesOptions,
+} from './envelope.js';
 /**
  * Reporting only. `aeadBackend()` says which implementation the next seal will
  * use so a slow run can be explained rather than guessed at. `sealAead` and
@@ -257,6 +267,16 @@ export { decodeEnvelopeBytes, encodeEnvelopeBytes } from './envelope.js';
  * it outside a ratchet.
  */
 export { aeadBackend, aeadReady, openAead, sealAead } from './aead.js';
+/**
+ * Same deal for the curves, and for the same reason: a handshake that takes
+ * 27 ms instead of 5 ms is a backend question, not a mystery. `curveBackend()`
+ * says which x25519 implementation the next key exchange will use.
+ *
+ * The raw curve operations are deliberately NOT exported the way `sealAead`
+ * and `openAead` are. Nobody needs a bare x25519 from this package, and every
+ * public primitive is one more thing that can be reached for and misused.
+ */
+export { curveBackend, curvesReady } from './curves.js';
 export {
   serializeSession,
   deserializeSession,

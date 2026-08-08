@@ -10,6 +10,39 @@
 // left to right without mental byte swapping.
 import net from 'node:net';
 
+// How many bytes we let pile up unflushed in the socket before send() makes the
+// caller wait. This is the memory bound on a slow peer, and it is the whole
+// backpressure policy in one number.
+//
+// It replaces an accidental bound of 16384, Node's default
+// writableHighWaterMark, which was never chosen for this transport. A payload
+// chunk is 65519 plaintext bytes plus envelope plus a 4 byte prefix, so every
+// single chunk frame was four times the default watermark: write() returned
+// false on essentially every write and send() parked on 'drain' until the
+// kernel had taken the whole frame. Measured on a 10.5 MB transfer, 160 of 163
+// sender writes tripped it, and the sender therefore never sealed a chunk while
+// the previous one was still moving. The comment in cli/protocol.mjs promising
+// exactly that overlap was false for that reason.
+//
+// 1 MiB, because the bound has to satisfy three things at once:
+//
+//   - Bigger than one frame, or we are back where we started. The largest frame
+//     this transport accepts is MAX_FRAME, but the largest one this CLI sends is
+//     a sealed 64 KiB chunk, so 1 MiB clears the real traffic by 16x.
+//   - Big enough to keep a fat long link busy. Bandwidth times round trip is
+//     what a sender has to keep unacknowledged to avoid idling, and 1 MiB covers
+//     100 Mbit/s at 80 ms, which is a relayed VPN hop between continents.
+//   - Small enough that a stalled receiver is not a memory bug. A peer that
+//     stops reading costs 1 MiB per channel here, plus at most one frame that
+//     was already submitted when the limit was hit. That is the safety the old
+//     wait-on-every-write had, kept, and it is why send() still waits rather
+//     than resolving and letting the queue grow without limit.
+//
+// A frame larger than this bound is still allowed and still bounded: write()
+// takes it, returns false, and send() waits, which is exactly the old behaviour
+// for the one case it was the right behaviour for.
+const WRITE_WINDOW = 1024 * 1024;
+
 // A hostile or buggy peer could otherwise name any size it likes and make us
 // allocate for it. 8 MiB is generous for a chunked payload frame and small
 // enough that a runaway sender fails fast instead of eating memory.
@@ -56,6 +89,25 @@ function makeChannel(socket, remote) {
   let closePromise = null;
   let sawFrame = false;
   let idleTimer = null;
+  // Senders parked because the socket is over WRITE_WINDOW. A list rather than
+  // a per-write socket.once('drain'), because a caller is now free to keep
+  // sealing while an earlier send is still parked, and a listener per in flight
+  // write would both leak and trip Node's max listener warning.
+  let drainWaiters = [];
+
+  function releaseWrites() {
+    if (!drainWaiters.length) return;
+    const waiting = drainWaiters;
+    drainWaiters = [];
+    for (const w of waiting) w.resolve();
+  }
+
+  function rejectWrites(err) {
+    if (!drainWaiters.length) return;
+    const waiting = drainWaiters;
+    drainWaiters = [];
+    for (const w of waiting) w.reject(err);
+  }
 
   function disarmIdle() {
     if (idleTimer) {
@@ -106,6 +158,9 @@ function makeChannel(socket, remote) {
       waiter = null;
       w.reject(err);
     }
+    // A write parked on 'drain' would otherwise hang forever, since a destroyed
+    // socket never drains.
+    rejectWrites(err);
     socket.destroy();
   }
 
@@ -191,10 +246,19 @@ function makeChannel(socket, remote) {
   }
 
   socket.on('data', onData);
+  // Fires when the unflushed bytes fall back under the watermark, which is the
+  // bound in WRITE_WINDOW. One listener for the life of the channel.
+  socket.on('drain', releaseWrites);
   // A socket that can raise 'error' without a handler crashes the process,
   // so this listener exists purely to route failures into pending promises
   // instead of letting Node's default behavior take the process down.
   socket.on('error', (err) => fail(err));
+  // A socket torn down without an 'error' still has to unpark anyone waiting on
+  // a drain that is never coming. close() destroying after LINGER_MS is the
+  // ordinary way to get here.
+  socket.on('close', () => {
+    rejectWrites(fatalError ?? new Error(`connection to ${remote} closed before the frame drained`));
+  });
   socket.on('end', () => {
     ended = true;
     disarmIdle();
@@ -234,7 +298,28 @@ function makeChannel(socket, remote) {
     });
   }
 
-  async function send(bytes) {
+  /**
+   * Put one frame on the socket.
+   *
+   * The bytes are handed to write() synchronously, before this function ever
+   * returns, so frame order on the wire is the order send() was CALLED in, not
+   * the order the returned promises are awaited in. That is what lets a caller
+   * seal the next frame while this one is in flight: submit, go do CPU work,
+   * await the promise before submitting the next one. Awaiting is what enforces
+   * the bound, so a caller that never awaits is back to an unbounded queue.
+   *
+   * The promise resolves once the socket is back under WRITE_WINDOW, which on
+   * anything smaller than the window is immediately.
+   *
+   * `prefixReserved` says the caller has already left PREFIX_BYTES of room at
+   * the front of `bytes` for the length, so the prefix is written in place and
+   * the frame goes out with no copy at all. The default builds the frame here,
+   * which costs one allocation and one copy of the whole payload. The wire is
+   * identical either way: the same four bytes then the same payload. The price
+   * of the no-copy path is that the socket holds the caller's memory until the
+   * returned promise resolves, so that buffer is off limits until then.
+   */
+  async function send(bytes, { prefixReserved = false } = {}) {
     if (fatalError) throw fatalError;
     if (socket.destroyed) throw new Error(`channel to ${remote} is closed`);
     if (!(bytes instanceof Uint8Array)) {
@@ -243,34 +328,36 @@ function makeChannel(socket, remote) {
       // shipping a UTF-8 reinterpretation of its own ciphertext.
       throw new Error('channel.send expects a Uint8Array of frame bytes');
     }
-    if (bytes.length > MAX_FRAME) {
-      throw new Error(`frame of ${bytes.length} bytes exceeds the ${MAX_FRAME} byte limit`);
+    if (prefixReserved && bytes.length < PREFIX_BYTES) {
+      throw new Error(
+        `channel.send was told the first ${PREFIX_BYTES} bytes are a reserved length prefix, but the frame is only ${bytes.length} bytes long`,
+      );
+    }
+    const payloadBytes = prefixReserved ? bytes.length - PREFIX_BYTES : bytes.length;
+    if (payloadBytes > MAX_FRAME) {
+      throw new Error(`frame of ${payloadBytes} bytes exceeds the ${MAX_FRAME} byte limit`);
     }
     // Prefix and payload go out as one buffer, not two writes. Two writes
     // from overlapping send() calls could interleave, and a prefix followed
     // by somebody else's payload desynchronises the peer's reader forever.
-    const out = Buffer.allocUnsafe(PREFIX_BYTES + bytes.length);
-    out.writeUInt32BE(bytes.length, 0);
-    out.set(bytes, PREFIX_BYTES);
+    let out;
+    if (prefixReserved) {
+      // A view over the caller's memory, not a copy of it. Buffer.from on an
+      // ArrayBuffer aliases; the writeUInt32BE lands in the caller's buffer,
+      // which is the point.
+      out = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length);
+    } else {
+      out = Buffer.allocUnsafe(PREFIX_BYTES + bytes.length);
+      out.set(bytes, PREFIX_BYTES);
+    }
+    out.writeUInt32BE(payloadBytes, 0);
+    // false means the socket now holds at least WRITE_WINDOW unflushed bytes.
+    // Resolving anyway would be the unbounded-memory growth the pinned
+    // interface calls out, so we park until 'drain' says the backlog cleared.
+    // The bytes are already queued in order either way.
+    if (socket.write(out)) return;
     return new Promise((resolve, reject) => {
-      function onError(err) {
-        socket.off('error', onError);
-        reject(err);
-      }
-      socket.once('error', onError);
-      // write() returning false means the kernel buffer is full; resolving
-      // anyway here is exactly the unbounded-memory growth the pinned
-      // interface calls out, so we wait for 'drain' instead.
-      const flushed = socket.write(out);
-      if (flushed) {
-        socket.off('error', onError);
-        resolve();
-      } else {
-        socket.once('drain', () => {
-          socket.off('error', onError);
-          resolve();
-        });
-      }
+      drainWaiters.push({ resolve, reject });
     });
   }
 
@@ -299,12 +386,24 @@ function makeChannel(socket, remote) {
   // next is the name the CLI has always called; receive is the name the
   // binary transport is specified under. Same function, so a mixed set of
   // callers during the switch cannot end up reading two different queues.
-  return { remote, send, receive, next: receive, close };
+  //
+  // prefixBytes is how a caller learns what `prefixReserved` costs without
+  // importing this module. cli/protocol.mjs takes its channel by injection and
+  // knows nothing about the framing on purpose, so asking the channel is the
+  // only way it can leave the right amount of room in front of an envelope. A
+  // transport with no prefix reports 0 and the caller reserves nothing.
+  return { remote, prefixBytes: PREFIX_BYTES, send, receive, next: receive, close };
 }
 
 export async function listen({ port = 0, host } = {}) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
+    // highWaterMark is the knob that decides when write() starts saying false,
+    // and it has to be set at construction: the socket exposes it read only
+    // afterwards. net.createServer applies it to every accepted socket. It
+    // moves the readable side too, which this transport does not care about
+    // either way, because 'data' is consumed synchronously and nothing ever
+    // accumulates on that side.
+    const server = net.createServer({ highWaterMark: WRITE_WINDOW });
     const pendingChannels = [];
     const pendingPulls = [];
     const CLOSED = Symbol('frame-server-closed');
@@ -370,7 +469,9 @@ export async function listen({ port = 0, host } = {}) {
 
 export async function connect({ host, port, timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
+    // Only the writable side here, since net.Socket takes the per-direction
+    // option and the connecting side has no reason to move the other one.
+    const socket = new net.Socket({ writableHighWaterMark: WRITE_WINDOW });
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -407,8 +508,16 @@ export async function connect({ host, port, timeoutMs = 10000 } = {}) {
   });
 }
 
+/**
+ * Bytes of length prefix on every frame.
+ *
+ * Exported so a caller that wants the no-copy send path knows how much room to
+ * leave at the front of its buffer, and so nobody has to hardcode 4 to find out.
+ */
+export const FRAME_PREFIX_BYTES = PREFIX_BYTES;
+
 // Reassembly is the one part of this file that has already been got wrong
 // once, and a real socket will not reproduce a prefix split across two 'data'
 // events on demand. Exported so the test can drive the reader with exactly
 // the chunking it wants. Not part of the CLI's interface.
-export const __internal = { makeChannel, MAX_FRAME };
+export const __internal = { makeChannel, MAX_FRAME, WRITE_WINDOW };

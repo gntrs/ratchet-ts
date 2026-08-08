@@ -5,6 +5,142 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-08-08
+
+Same wire format, byte for byte, and the same public API plus three additive
+exports. Everything below is speed, honesty about past numbers, and a trust
+store the tool should have had from the start.
+
+### Fixed
+
+- **The benchmark was measuring a dead path, and had been for two releases.**
+  `bench/wire.mjs` kept its own copy of the frame sequence instead of calling
+  `cli/protocol.mjs`. In 0.3.1 the CLI moved from `sealBytes` / `openBytes` to
+  `sealToEnvelopeBytes` / `openFromEnvelopeBytes`, which skips a base64url
+  round trip on every chunk. The benchmark did not move with it, so for two
+  releases it reported the cost of base64url encoding 65535 byte ciphertexts,
+  a path nothing has shipped since 0.3.1. It printed 4.37 MB/s where the real
+  code did 47.74. The published throughput figures from 0.3.1 and 0.3.2 are
+  wrong by roughly 11x, in the library's favour, and `bench/README.md` now
+  opens by saying so and marks the stale table as not quotable. The harness no
+  longer has a payload path of its own: it imports `sendPayload` and
+  `receivePayload` from the real module and takes `PROTOCOL_VERSION` and
+  `DEFAULT_CHUNK_BYTES` from it rather than restating them. One section still
+  drives the engine directly, because the CLI reports a single cumulative
+  `cryptoMs` with no handshake only figure, and that section is now guarded: it
+  prints the real `handshakeMs` from both sides beside its own and says `DRIFT`
+  if they diverge by more than 2x.
+- The sender stalled on every single chunk. A socket's default
+  `writableHighWaterMark` is 16 kB and a frame is 64 kB, so `write()` returned
+  false every time and the send awaited `'drain'` before returning. Measured:
+  160 of 163 writes blocked, and the comment claiming the receiver was opening
+  chunk i while the sender sealed chunk i + 1 was simply false, since the loop
+  could not reach the next seal until the kernel had taken the whole frame. The
+  write window is now 1 MiB, set at construction on both the dialing socket and
+  the server, and the wait moved one frame later so the next chunk is sealed
+  while the previous one is still with the socket. It is still a bound and not
+  a queue: past 1 MiB of unflushed bytes the sender still stops dead, so a slow
+  receiver cannot make a fast sender allocate without limit.
+- The receiver was charged for work the sender did off the clock. It hashed the
+  whole assembled payload in one pass inside `wallMs`, while the sender
+  computed its digest before the window opened, because the header carries it.
+  The receiver now hashes each chunk as it lands. Same window, same work
+  counted, no serial tail. The digest is still fed from the assembled buffer
+  and never from the chunk plaintext, because a digest of the chunks would
+  agree with itself wherever they landed and the whole point of that hash is to
+  catch an assembly bug the per chunk AEAD tags cannot see.
+
+### Added
+
+- **A peer trust store.** Until now a fingerprint change was undetectable:
+  `cli/store.mjs` held your own identity and nothing remembered a peer. The six
+  safety words could catch a machine in the middle, but only if two humans
+  compared them out loud, every session, which nobody does. `~/.ratchet/peers.json`
+  now records each peer by identity hex, mode 0600, written with the same
+  stage and rename as the identity file. `send`, `recv` and `chat` classify the
+  peer at handshake as new, known, verified or changed, and print it before the
+  first byte moves.
+- The changed verdict is the only alarm, and it fires on one condition: this
+  address previously carried a different **verified** key. A previously
+  unverified association never raises it, because it never carried a claim, and
+  a verified key arriving from a new address is a dim one line note rather than
+  an alarm, because the key is what was verified and the key did not change.
+  The alarm says out loud that anything already sent this session went to the
+  new key, refuses to be dismissed by a keystroke, and offers exactly two typed
+  commands.
+- `ratchet peers`, `ratchet peers verify WHO [--label NAME]` and
+  `ratchet peers forget WHO`, all with `--json`. Verify asks a real question and
+  accepts only the literal word `yes`. In chat, `/verify NAME` asks the same
+  question through a seam that `bin/` owns, so the chat loop still knows nothing
+  about disk.
+- `hashBackend()`, `hashReady()`, `curveBackend()` and `curvesReady()` are
+  exported alongside the existing `aeadBackend()` and `base64Backend()`. A
+  handshake that takes 27 ms instead of 5 ms is a backend question, not a
+  mystery, and there was no way to ask it. The raw curve and hash primitives are
+  deliberately not exported: nobody needs a bare x25519 from this package, and
+  every public primitive is one more thing that can be misused.
+- `sealToEnvelopeBytes` takes an optional `{ reserve }` that leaves N zero bytes
+  in front of the envelope inside the same allocation, so a transport can stamp
+  its own length prefix in place instead of copying the whole frame to prepend
+  four bytes. The CLI asks the channel how many it wants rather than assuming,
+  so a transport that needs no prefix reports 0 and nothing changes.
+
+### Changed
+
+- **Native backends for the curves and the hashes**, resolved by the same probe
+  and silent fallback shape `src/aead.ts` already used. The probe refuses the
+  native path unless it reproduces the reference implementation exactly,
+  including rejecting every low order point, and a backend that fails any of it
+  is discarded with nobody the wiser. Errors are the load bearing detail here:
+  OpenSSL and noble throw different error objects for the same bad input, which
+  a caller matching on a message could use to tell which backend answered, so
+  the native path never reports a failure. It returns null and the wrapper
+  re runs through noble, which throws the error it has always thrown, byte for
+  byte, at the cost of one wasted call on an input that was going to throw
+  anyway.
+- Fewer full size copies. The envelope encoder allocates once instead of three
+  times, the decoder hands the AEAD a view of the ciphertext instead of a copy,
+  and the native AEAD open returns its own buffer when the final block is empty,
+  which for ChaCha20-Poly1305 it always is. Profiling had byte copies at 1.5x
+  the cost of the encryption itself.
+- `pairWords` and the failure explanation table lived in two files each. The two
+  copies of `pairWords` had not drifted, checked byte for byte before touching
+  them, but two independent copies of a security critical derivation is a bug
+  waiting for whoever edits one of them: a user comparing a chat against a
+  transfer and seeing two different word sets would conclude, wrongly, that
+  something was wrong. Both are now single exports. The explanation table gained
+  a second column so a chat says something a chat can act on, rather than the
+  raw reason code it printed before.
+
+### Numbers
+
+Same machine, published 0.3.2 against this release, arms interleaved, real
+`ratchet send` and `ratchet recv` processes, wire bytes and payload SHA-256
+identical across every run.
+
+| | 0.3.2 | 0.3.3 |
+| --- | --- | --- |
+| sender | 56.48 MB/s | 79.98 MB/s |
+| receiver | 50.31 MB/s | 69.22 MB/s |
+| handshake key exchange | 27.2 ms | 4.6 ms |
+| wire overhead | 0.2% | 0.2% |
+
+The throughput gain is roughly 1.4x. It is not the 11x implied by comparing
+against the old published figure, and that comparison should not be made: most
+of that gap was the benchmark measuring something nothing shipped.
+
+### A note on what is now on your disk
+
+Before this release, running `ratchet` left one identity key and no history. It
+now leaves a durable timestamped list of who this machine talked to and from
+what address, which is a social graph that was previously nowhere on disk. It
+holds no message content: no text, no filename, no size, no count, no payload
+hash. `ratchet peers forget` takes a row back. The chat closing line changed
+from "Nothing was written to disk" to "No message was written to disk", because
+the old sentence stopped being true.
+
+Suite is 179 tests.
+
 ## [0.3.2] - 2026-08-07
 
 ### Fixed
