@@ -277,6 +277,18 @@ export { aeadBackend, aeadReady, openAead, sealAead } from './aead.js';
  * public primitive is one more thing that can be reached for and misused.
  */
 export { curveBackend, curvesReady } from './curves.js';
+/**
+ * And the hashes, which matter more than the other two look like they should.
+ * The chain step is two HMAC-SHA256 per message in each direction, so it runs
+ * more often than any other primitive here, and on the JavaScript path it was
+ * measured at about a third of the cost of sealing a chat sized message. If
+ * this reports 'noble' on a machine that has node:crypto, the probe rejected
+ * the native path and every message is paying for it.
+ *
+ * Raw `hmacSha256` and `hkdfSha256` stay unexported for the same reason the
+ * curve operations do.
+ */
+export { hashBackend, hashReady } from './hash.js';
 export {
   serializeSession,
   deserializeSession,
