@@ -374,19 +374,31 @@ test('the write leaves no temp file behind', async () => {
     await savePeers(storeWith([{ hex: HEX_A, words: WORDS_A, address: '192.168.1.42' }]));
     const { readdir } = await import('node:fs/promises');
     const left = await readdir(dir);
-    assert.deepEqual(left, ['peers.json']);
+    // A save now also mints the vault descriptor, because a write is the moment
+    // a home directory acquires protection. What must never be left behind is a
+    // staging file: those hold the same secrets under a name nobody cleans up.
+    assert.ok(left.includes('peers.json'), `expected peers.json, got ${left.join(', ')}`);
+    assert.deepEqual(left.filter((name) => name.endsWith('.tmp')), []);
   });
 });
 
-test('the file records no message content, only identities and addresses', async () => {
+test('the file records no message content, and no plaintext about who', async () => {
   await withHome(async () => {
     await savePeers(storeWith([{ hex: HEX_A, words: WORDS_A, address: '192.168.1.42', verified: true, label: 'Ana' }]));
-    const raw = JSON.parse(await readFile(peersFile(), 'utf8'));
-    assert.deepEqual(Object.keys(raw), ['v', 'peers']);
-    assert.deepEqual(
-      Object.keys(raw.peers[HEX_A]).sort(),
-      ['addresses', 'firstSeen', 'label', 'lastSeen', 'verified', 'verifiedAt', 'words'],
-    );
+    const text = await readFile(peersFile(), 'utf8');
+    const raw = JSON.parse(text);
+    assert.deepEqual(Object.keys(raw).sort(), ['note', 'peers', 'protection', 'salt', 'v']);
+
+    // The whole target property, asserted the blunt way: none of the four things
+    // that identify a human survive as readable text in this file.
+    for (const secret of [HEX_A, WORDS_A, '192.168.1.42', 'Ana']) {
+      assert.equal(text.includes(secret), false, `${secret} is readable in peers.json`);
+    }
+    // One row per peer and nothing else: a copy without the key is a count.
+    // Each row is a single opaque string, so there are no per field lengths to
+    // read either.
+    assert.equal(Object.keys(raw.peers).length, 1);
+    assert.equal(typeof Object.values(raw.peers)[0], 'string');
   });
 });
 

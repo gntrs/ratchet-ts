@@ -31,13 +31,30 @@
  * to disk about the content of a conversation and this file does not change
  * that promise.
  *
- * It is still a real privacy change and it is worth being blunt about it: before
- * this file, running `ratchet` left behind one identity key and no history. Now
- * it leaves a durable, timestamped list of who this machine has talked to and
- * from which addresses. Anyone who can read the file learns the shape of a
- * social graph that was previously nowhere on disk. That is the price of being
- * able to detect a changed key at all, and `ratchet peers forget` is how a user
- * takes any single row of it back.
+ * Through 0.3.x it recorded all of that in plain JSON, and that was a real
+ * privacy regression dressed up as a security feature: a timestamped, labelled
+ * list of who this machine had talked to and from where, in a file that had not
+ * existed at all one version earlier. The trust store is worth having, so the
+ * answer is to harden it rather than to delete it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE PROPERTY THIS FILE NOW HAS
+ * ---------------------------------------------------------------------------
+ *
+ * WITH the vault key, this store works exactly as it did before: same in memory
+ * shape, same classification, same alarm.
+ *
+ * WITHOUT it, a copy of this file yields a COUNT OF PEERS AND NOTHING ELSE. No
+ * names, no words, no addresses, no dates, no verification flags. Every row is
+ * one padded XChaCha20-Poly1305 envelope, so the rows do not even differ in
+ * length, and the map key each one is filed under is a MAC of the peer identity
+ * under a subkey of the vault key, which reveals the identity to nobody and can
+ * be recomputed in one step by anybody holding the key. See cli/vault.mjs for
+ * where that key lives and what it does not protect against.
+ *
+ * When no vault is available the file falls back to plain JSON, exactly as it
+ * was, and says "UNPROTECTED" in its own note field rather than looking the
+ * same as a protected one.
  *
  * ---------------------------------------------------------------------------
  * KEYED BY HEX, NEVER BY WORDS
@@ -51,20 +68,37 @@
  * the only thing that will help.
  */
 
-import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { platform } from 'node:os';
+import { createHmac, randomBytes } from 'node:crypto';
+import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { homeDir } from './store.mjs';
+import {
+  VAULT_INFO,
+  b64u,
+  ensureHome,
+  homeDir,
+  pad,
+  seal,
+  subkey,
+  unb64u,
+  unpad,
+  unseal,
+  vaultKey,
+  vaultState,
+  writeAtomic,
+} from './vault.mjs';
 
 /**
  * Bumped only when the shape below changes in a way an older reader cannot
  * cope with. A reader that meets a version it does not know refuses rather
  * than guessing, because guessing at a trust record is how a verification
  * quietly turns into a non-verification.
+ *
+ * 1 was the plain JSON store of 0.3.x, which this still reads so that nobody
+ * loses a verification by upgrading. 2 is the sealed store.
  */
-export const PEERS_VERSION = 1;
+export const PEERS_VERSION = 2;
+const LEGACY_PEERS_VERSION = 1;
 
 /**
  * A roaming laptop can collect a new address every time it moves, and this file
@@ -109,17 +143,109 @@ function normaliseEntry(hex, raw) {
   };
 }
 
+/**
+ * Timestamps are coarsened to the day on the way to disk, and only there.
+ *
+ * Minute resolution is the part that turns a contact list into a pattern of
+ * life record. "Have I talked to this person recently" and "how long have I
+ * known this key", which are the two questions this file exists to answer, are
+ * both answered at day resolution. "This person is at their desk at 08:47 on
+ * weekdays" is not a question anybody asked it, and it is the one a stolen copy
+ * answers best.
+ *
+ * Coarsening on write rather than in recordSighting keeps the in memory value
+ * at full resolution for the life of the process, which costs nothing and
+ * keeps every caller's contract unchanged. Slicing an already coarsened value
+ * is a no-op, so a load and save cycle is stable.
+ */
+function day(stamp) {
+  const text = typeof stamp === 'string' ? stamp : '';
+  return text.length >= 10 ? text.slice(0, 10) : null;
+}
+
 /** The on-disk projection. `hex` is the key, so it is not repeated in the value. */
 function serialiseEntry(entry) {
   return {
     label: entry.label,
     words: entry.words,
-    firstSeen: entry.firstSeen,
-    lastSeen: entry.lastSeen,
+    firstSeen: day(entry.firstSeen),
+    lastSeen: day(entry.lastSeen),
     verified: entry.verified,
-    verifiedAt: entry.verifiedAt,
+    verifiedAt: day(entry.verifiedAt),
     addresses: entry.addresses,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The sealed shape
+// ---------------------------------------------------------------------------
+
+/**
+ * The name a row is filed under.
+ *
+ * The brief asked for a salted hash of the identity hex, so that a copied file
+ * cannot be run against a rainbow table of known public keys. This does that
+ * and one thing more: the hash is KEYED, with a subkey of the vault key, and
+ * the per file salt is mixed in as well.
+ *
+ * The upgrade is free and it closes a real gap. A salt that is stored in the
+ * same file only stops a PRECOMPUTED table. It does nothing against an attacker
+ * who has a specific key in mind and wants to know whether this machine has
+ * talked to it, because they can hash that one candidate with the salt they can
+ * read. Keying it means an attacker without the vault key cannot even ask that
+ * question. The salt still earns its place: it makes two files written under
+ * one vault key file the same peer under different names, so two stolen
+ * directories cannot be correlated row by row.
+ *
+ * Lookup stays one MAC per handshake, which is what the brief cared about.
+ */
+function indexOf(salt, indexKey, hex) {
+  return b64u(createHmac('sha256', indexKey).update(salt).update(Buffer.from(hex, 'utf8')).digest().subarray(0, 16));
+}
+
+function entryAad(id) {
+  return `${VAULT_INFO.peersEntry}|${id}`;
+}
+
+/**
+ * Everything except the row name goes inside the envelope, INCLUDING the
+ * addresses, and that is a deliberate departure from the brief.
+ *
+ * The brief asked for addresses to be salted hashes on the same argument as the
+ * identity hex. The argument does not carry over. An identity digest is 128
+ * bits of unguessable value, so hashing it hides it. An IPv4 address is one of
+ * 2^32 values and the salt is in the file, so a copied store can be exhausted
+ * against the whole address space in seconds on any GPU, and the answer comes
+ * back as the plain address. Hashing them would look like protection and
+ * provide close to none. Sealing them provides all of it, and it costs nothing
+ * here because loadPeers already decrypts every row into memory: the alarm then
+ * compares plain strings exactly as it always did, so classifyPeer is untouched
+ * and its tests are untouched with it.
+ *
+ * The known IPv4 versus IPv6 gap is therefore unchanged: 127.0.0.1 and
+ * ::ffff:127.0.0.1 remain two different rows in the address list, because they
+ * are two different strings. Hashing would have preserved that gap exactly,
+ * since it preserves inequality; sealing preserves it too. Neither makes it
+ * better or worse. It is a normalisation bug in addressOf's callers, and the
+ * honest place to fix it is there, not by pretending an encoding choice is a
+ * privacy control.
+ *
+ * `verified` goes inside as well, which is stronger than the brief asked for. A
+ * plaintext boolean can be flipped by anyone who can write the file; one inside
+ * an AEAD cannot be flipped by anyone who cannot forge a tag. Since the store is
+ * unreadable without the key anyway, there was never a reason to leave the one
+ * field the whole file exists for exposed on its own.
+ */
+function sealEntry(entryKey, id, entry) {
+  const body = JSON.stringify({ hex: entry.hex, ...serialiseEntry(entry) });
+  return b64u(seal(entryKey, entryAad(id), pad(Buffer.from(body, 'utf8'))));
+}
+
+function openEntry(entryKey, id, blob) {
+  const plain = unpad(unseal(entryKey, entryAad(id), unb64u(blob)));
+  const parsed = JSON.parse(plain.toString('utf8'));
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.hex !== 'string') return null;
+  return parsed;
 }
 
 /**
@@ -136,6 +262,14 @@ function serialiseEntry(entry) {
  * failing the transfer, so a broken file costs the user the trust check and
  * tells them so, in place of costing them the tool.
  */
+const PROTECTED_NOTE =
+  'Every row below is one sealed envelope. With the vault key this is a normal trust store. ' +
+  'Without it, it is a count of peers and nothing else: no names, no words, no addresses, no dates.';
+
+const UNPROTECTED_NOTE =
+  'UNPROTECTED. Every row below is readable by anyone who can read this file: who this machine has ' +
+  'talked to, from where, and when. No keychain was reachable here. Run: ratchet lock';
+
 export async function loadPeers() {
   const path = peersFile();
   let raw;
@@ -160,7 +294,7 @@ export async function loadPeers() {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`${path} is corrupt: the top level is not a JSON object. Move it aside to start again.`);
   }
-  if (parsed.v !== PEERS_VERSION) {
+  if (parsed.v !== PEERS_VERSION && parsed.v !== LEGACY_PEERS_VERSION) {
     throw new Error(
       `${path} is version ${String(parsed.v)} and this ratchet reads version ${PEERS_VERSION}. ` +
         `A newer ratchet wrote it. Upgrade, or move the file aside to start a fresh trust store.`,
@@ -170,10 +304,56 @@ export async function loadPeers() {
     throw new Error(`${path} is corrupt: the peers field is not a JSON object. Move it aside to start again.`);
   }
 
+  // Version 1, and version 2 written on a machine with no vault, are both plain
+  // rows keyed by hex. Version 1 files get upgraded the next time anything is
+  // saved, which is the first completed handshake.
+  const sealed = parsed.v === PEERS_VERSION && parsed.protection && parsed.protection !== 'none';
+  if (!sealed) {
+    const peers = {};
+    for (const [hex, value] of Object.entries(parsed.peers)) {
+      const entry = normaliseEntry(hex, value);
+      if (entry) peers[hex] = entry;
+    }
+    return { v: PEERS_VERSION, peers };
+  }
+
+  if (typeof parsed.salt !== 'string') {
+    throw new Error(`${path} is corrupt: it says it is sealed but carries no salt, so no row in it can be named.`);
+  }
+  const key = await vaultKey();
+  if (!key) {
+    throw new Error(
+      `${path} is sealed with ${String(parsed.protection)} and there is no vault key here to open it. ` +
+        `Nothing is lost while the "vault" file beside it survives. A store sealed to a keychain does not ` +
+        `travel to another machine or another user account.`,
+    );
+  }
+  const salt = unb64u(parsed.salt);
+  const entryKey = subkey(key, VAULT_INFO.peersEntry);
+  const indexKey = subkey(key, VAULT_INFO.peersIndex);
+
   const peers = {};
-  for (const [hex, value] of Object.entries(parsed.peers)) {
-    const entry = normaliseEntry(hex, value);
-    if (entry) peers[hex] = entry;
+  for (const [id, blob] of Object.entries(parsed.peers)) {
+    let raw2;
+    try {
+      raw2 = typeof blob === 'string' ? openEntry(entryKey, id, blob) : null;
+    } catch (cause) {
+      throw new Error(
+        `${path} is corrupt: row ${id} did not open with this machine's vault key. Either the file was ` +
+          `changed since it was written, or it belongs to another vault. It is not being discarded, because ` +
+          `discarding it would throw away every verification in it.`,
+        { cause },
+      );
+    }
+    if (!raw2) throw new Error(`${path} is corrupt: row ${id} opened into something that is not a peer record.`);
+    // The row name is recomputed rather than trusted. A row moved from one name
+    // to another cannot survive the AEAD's associated data anyway, so this is
+    // belt and braces, and it costs one MAC.
+    if (indexOf(salt, indexKey, String(raw2.hex).toLowerCase()) !== id) {
+      throw new Error(`${path} is corrupt: row ${id} holds a peer that does not belong under that name.`);
+    }
+    const entry = normaliseEntry(String(raw2.hex).toLowerCase(), raw2);
+    if (entry) peers[entry.hex] = entry;
   }
   return { v: PEERS_VERSION, peers };
 }
@@ -184,28 +364,41 @@ export async function loadPeers() {
  * never half written, because rename is atomic on POSIX and on NTFS within one
  * volume. That matters more here than for the identity: a half written trust
  * store is a store that has silently forgotten a verification.
+ *
+ * A write is also the moment this directory acquires a vault if it has none,
+ * which is why the key is asked for with `create`. A read never creates one.
  */
-export async function savePeers(store) {
+export async function savePeers(store, override = null) {
   const path = peersFile();
-  const out = { v: PEERS_VERSION, peers: {} };
-  for (const [hex, entry] of Object.entries(store.peers)) out.peers[hex] = serialiseEntry(entry);
+  await ensureHome();
 
-  await mkdir(homeDir(), { recursive: true, mode: 0o700 });
-  // The mode passed to mkdir and writeFile is masked by umask, so what lands on
-  // disk can be looser than asked for. chmod after the fact is the only way to
-  // get the real bits, and on Windows it is a genuine no-op rather than a
-  // silent lie: this file carries no file-mode confidentiality there at all,
-  // only whatever the default ACL on the user's profile directory grants.
-  if (platform() !== 'win32') {
-    await chmod(homeDir(), 0o700);
+  // `override` exists for exactly one caller: `ratchet lock` and `ratchet
+  // unlock`, which are mid transaction and hold a key that the descriptor on
+  // disk does not name yet. Nothing else may pass it, because writing this file
+  // under a key the descriptor does not point at is how a store becomes
+  // unreadable.
+  const key = override ? override.key : await vaultKey({ create: true });
+  if (!key) {
+    const out = { v: PEERS_VERSION, protection: 'none', note: UNPROTECTED_NOTE, peers: {} };
+    for (const [hex, entry] of Object.entries(store.peers)) out.peers[hex] = serialiseEntry(entry);
+    await writeAtomic(path, `${JSON.stringify(out, null, 2)}\n`);
+    return;
   }
 
-  const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(out, null, 2)}\n`, { mode: 0o600 });
-  if (platform() !== 'win32') {
-    await chmod(tmp, 0o600);
+  const protection = override ? override.protection : (await vaultState()).protection;
+  // A fresh salt on every write, not a stable one. Rewriting the file renames
+  // every row, so two snapshots of the same store taken a week apart cannot be
+  // diffed row by row by somebody who has both and neither key.
+  const salt = randomBytes(16);
+  const entryKey = subkey(key, VAULT_INFO.peersEntry);
+  const indexKey = subkey(key, VAULT_INFO.peersIndex);
+
+  const out = { v: PEERS_VERSION, protection, note: PROTECTED_NOTE, salt: b64u(salt), peers: {} };
+  for (const entry of Object.values(store.peers)) {
+    const id = indexOf(salt, indexKey, entry.hex);
+    out.peers[id] = sealEntry(entryKey, id, entry);
   }
-  await rename(tmp, path);
+  await writeAtomic(path, `${JSON.stringify(out, null, 2)}\n`);
 }
 
 /** Deletes the whole store. Tolerates the file already being gone. */

@@ -22,7 +22,27 @@ import { fileURLToPath } from 'node:url';
 
 import { fingerprint, formatFingerprint, isCryptoFailure } from '../dist/index.js';
 import { connect, listen } from '../cli/frame.mjs';
-import { identityFile, loadIdentity, resetIdentity } from '../cli/store.mjs';
+import {
+  identityFile,
+  loadIdentity,
+  readIdentityToken,
+  resetIdentity,
+  rewrapIdentity,
+  takeMigrationNotice,
+} from '../cli/store.mjs';
+import {
+  clearRollback,
+  commitDescriptor,
+  describeProtection,
+  passphraseDescriptor,
+  plainOrKeychainDescriptor,
+  readPassphrase,
+  readRollback,
+  rollbackFile,
+  vaultFile,
+  vaultState,
+  writeRollback,
+} from '../cli/vault.mjs';
 import {
   addressOf,
   classifyPeer,
@@ -33,6 +53,7 @@ import {
   markVerified,
   peersFile,
   recordSighting,
+  resetPeers,
   savePeers,
 } from '../cli/peers.mjs';
 import { DEFAULT_CHUNK_BYTES, MAX_CHUNK_BYTES, receivePayload, sendPayload } from '../cli/protocol.mjs';
@@ -434,6 +455,8 @@ COMMANDS
   peers                                  everyone seen before, and who is verified
   peers verify WHO [--label NAME]        record that you compared the words aloud
   peers forget WHO                       drop one peer, WHO is a label or hex prefix
+  lock                                   ask for a passphrase on every command
+  unlock                                 stop asking, back to the keychain
 
 FLAGS
   --port N       listen on N instead of ${DEFAULT_PORT}
@@ -458,7 +481,22 @@ WORTH KNOWING
   key, its six words, the addresses it came from, and dates. That is how a
   changed key gets noticed. No filename and no message is ever recorded there.
   Delete a row with  ratchet peers forget WHO.
+
+YOUR KEY, AT REST
+  ~/.ratchet/identity is your long term secret key and ~/.ratchet/peers.json is
+  the list of who you have talked to. Both are sealed with one key that this
+  tool keeps in your operating system's own store: DPAPI on Windows, the
+  keychain on macOS, the login keyring on Linux. Nothing asks you for anything,
+  and a copy of those files taken to another machine is useless.
+  ratchet id  says which of the three states you are in.
+  If no such store exists here, the files are written in the clear and say so
+  in their own first line.  ratchet lock  replaces that with a passphrase, and
+  then every command asks for it once.  ratchet unlock  puts it back.
+  There is no recovery for a forgotten passphrase. The key is derived from it
+  and is stored nowhere.
   RATCHET_HOME moves the key file. RATCHET_DEBUG=1 adds stack traces.
+  RATCHET_PASSPHRASE unlocks without a prompt on an unattended machine, and
+  RATCHET_NEW_PASSPHRASE is the one  ratchet lock  reads instead of asking.
   Exit codes: 0 ok, 1 failure, 2 crypto failure.`;
 
 // ---------------------------------------------------------------------------
@@ -1011,7 +1049,7 @@ async function cmdRecv(opts) {
   const port = opts.port === undefined ? DEFAULT_PORT : parsePort(opts.port, '--port');
   const outDir = await outDirectory(opts);
 
-  const identity = await loadIdentity();
+  const identity = await openIdentity();
   const myWords = formatFingerprint(fingerprint(identity));
 
   // No host, so Node binds every interface. Which address the sender can
@@ -1285,7 +1323,7 @@ async function cmdSend(opts, rest) {
     name = basename(pathArg);
   }
 
-  const identity = await loadIdentity();
+  const identity = await openIdentity();
   // The host as typed, without the port. The dialling side has no better handle
   // on where it is calling, and the port here is the listener's, not the peer's.
   const trust = await openTrust(host);
@@ -1338,7 +1376,7 @@ async function loadChat() {
 async function cmdChat(opts, rest) {
   if (rest.length > 0) usageError(`chat takes no arguments, got ${rest[0]}`);
   const runChat = await loadChat();
-  const identity = await loadIdentity();
+  const identity = await openIdentity();
   // In --json mode stdout belongs to the JSON line, so the conversation goes
   // to stderr instead of corrupting it.
   const out = jsonMode ? process.stderr : process.stdout;
@@ -1428,27 +1466,205 @@ async function cmdId(opts) {
   if (opts.reset) {
     if (!opts.yes) {
       usageError(
-        'ratchet id --reset throws away your identity for good. Every peer that has ever ' +
-          'verified your safety words will see different ones and cannot tell that from an ' +
-          'attacker.',
+        'ratchet id --reset throws away your identity for good, and your peer list with it. ' +
+          'Every peer that has ever verified your safety words will see different ones and ' +
+          'cannot tell that from an attacker. You also lose every verification you have done, ' +
+          'so every peer goes back to being a first time stranger.',
         `If that is really what you want:  ${color.bold(`${cmd()} id --reset --yes`)}`,
       );
     }
     const path = identityFile();
+    // The peer list goes with it, and this is the point rather than a courtesy.
+    // Those rows were collected under the identity being destroyed, and they are
+    // the only thing in RATCHET_HOME that names anybody. Leaving them behind
+    // meant "start over" quietly kept a dated list of who this machine has
+    // talked to, sealed under a vault key that reset does not touch, so it stayed
+    // readable to exactly the person doing the reset to get rid of it. Reset now
+    // means the home holds no record of any conversation, which is what the word
+    // promises.
+    const peers = peersFile();
     await resetIdentity();
+    await resetPeers();
     say(`${color.yellow('discarded')} ${path}`);
+    say(`${color.yellow('discarded')} ${peers}`);
     say(color.dim('A new identity, with new safety words, is minted on the next command.'));
-    if (jsonMode) emit({ reset: true, identityFile: path });
+    if (jsonMode) emit({ reset: true, identityFile: path, peersFile: peers });
     return 0;
   }
 
-  const identity = await loadIdentity();
+  await noteInterrupted();
+  const identity = await openIdentity();
   // fingerprint() returns { words, hex }, not raw bytes. Scripts get the hex
   // because it carries more bits than the six words do.
   const print = fingerprint(identity);
   const myWords = formatFingerprint(print);
-  say(box('ratchet id', [`words     ${words(myWords)}`, `identity  ${color.dim(identityFile())}`]));
-  if (jsonMode) emit({ words: myWords, hex: print.hex, identityFile: identityFile() });
+  const state = await vaultState();
+  say(
+    box('ratchet id', [
+      `words     ${words(myWords)}`,
+      `identity  ${color.dim(identityFile())}`,
+      `at rest   ${atRestLine(state.protection)}`,
+    ]),
+  );
+  if (state.protection === 'none') {
+    say('');
+    say(
+      color.dim(
+        `Anyone who copies that file can be you. To need a passphrase instead:  ${color.bold(`${cmd()} lock`)}`,
+      ),
+    );
+  }
+  if (jsonMode) emit({ words: myWords, hex: print.hex, identityFile: identityFile(), protection: state.protection });
+  return 0;
+}
+
+/**
+ * Say so, once, if a previous `lock` or `unlock` did not finish.
+ *
+ * The sidecar is only ever left behind by a crash between the first file write
+ * and the descriptor write, so its presence is the single fact worth surfacing:
+ * the files on disk may be wrapped under a key the descriptor does not name,
+ * and the copies that predate the attempt are sitting in one place.
+ */
+async function noteInterrupted() {
+  const left = await readRollback();
+  if (!left) return;
+  say(`${color.yellow('interrupted')} ${color.dim('a previous lock or unlock did not finish')}`);
+  say(color.dim(`The files as they were before it started:  ${rollbackFile()}`));
+  say(color.dim('If everything below reads correctly, that file is safe to delete.'));
+  say('');
+}
+
+/** The one line `ratchet id` gains, and the only place protection is named. */
+function atRestLine(protection) {
+  if (protection === 'none') return `${color.yellow('unprotected')} ${color.dim('plain file, no key needed to read it')}`;
+  if (protection === 'pass') return `${color.green('passphrase')}  ${color.dim('asked for on every command')}`;
+  return `${color.green('sealed')}      ${color.dim(`key held by ${describeProtection(protection)}`)}`;
+}
+
+/**
+ * loadIdentity, plus the one sentence it may have to say about a file it
+ * rewrote without being asked. A migration that happens silently is a
+ * migration nobody can audit.
+ */
+async function openIdentity() {
+  const identity = await loadIdentity();
+  const notice = takeMigrationNotice();
+  if (notice) say(color.dim(notice));
+  return identity;
+}
+
+// ---------------------------------------------------------------------------
+// lock and unlock
+// ---------------------------------------------------------------------------
+
+/**
+ * The two files this tool leaves on disk, read out under the CURRENT key and
+ * written back under a NEW one, with a rollback copy in between.
+ *
+ * The order is the whole of the safety. Everything is read first, so a failure
+ * to open anything aborts before a single byte moves. The rollback sidecar is
+ * written second, so a crash from here on is recoverable by hand. The
+ * descriptor goes LAST, because it is the only thing that decides which key a
+ * later run will reach for: while it still names the old protection, the old
+ * files are still openable, and once it names the new one the new files are.
+ */
+async function reprotect({ descriptor, key }) {
+  const before = await vaultState();
+  const token = await readIdentityToken();
+
+  let store = null;
+  try {
+    store = await loadPeers();
+  } catch (err) {
+    failWith(
+      `the peer store will not open, so nothing was changed: ${err.message}`,
+      `Move it aside and run this again:  ${color.bold(`mv ${peersFile()} ${peersFile()}.broken`)}`,
+    );
+  }
+
+  const identityBefore = token === null ? null : await readFile(identityFile(), 'utf8').catch(() => null);
+  const peersBefore = await readFile(peersFile(), 'utf8').catch(() => null);
+  await writeRollback({
+    why: 'ratchet lock or unlock was interrupted. These are the files as they were before it started.',
+    descriptor: before.descriptor,
+    identity: identityBefore,
+    peers: peersBefore,
+  });
+
+  if (token !== null) await rewrapIdentity(token, descriptor.protection, key);
+  if (peersBefore !== null || Object.keys(store.peers).length > 0) {
+    await savePeers(store, { key, protection: descriptor.protection });
+  }
+  await commitDescriptor(descriptor, key, before.descriptor);
+  await clearRollback();
+  return before;
+}
+
+async function cmdLock(opts) {
+  if (opts.reset) usageError('lock takes no --reset');
+  const state = await vaultState();
+  // Resolve the CURRENT key before asking for a new one, so that re-locking
+  // does not print "new passphrase" and then "passphrase" and leave a person
+  // guessing which of the two the second prompt means.
+  if (state.protection !== 'none') await readIdentityToken();
+
+  // The environment variable is the deliberate channel for a machine with no
+  // human at it. A prompt that quietly reads a pipe is the failure this avoids:
+  // it would set somebody's passphrase to the next line of their own script.
+  const fromEnv = process.env.RATCHET_NEW_PASSPHRASE;
+  let passphrase;
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+    passphrase = fromEnv;
+  } else {
+    say(color.dim('Nothing on this machine can recover a forgotten passphrase. Write it down somewhere real.'));
+    passphrase = await readPassphrase('new passphrase: ');
+    if (passphrase.length === 0) failWith('an empty passphrase is not one, so nothing was changed');
+    const again = await readPassphrase('again: ');
+    if (again !== passphrase) failWith('those two do not match, so nothing was changed');
+  }
+  if (passphrase.length === 0) failWith('an empty passphrase is not one, so nothing was changed');
+
+  const { descriptor, key } = passphraseDescriptor(passphrase);
+  const before = await reprotect({ descriptor, key });
+
+  const what = state.protection === 'pass' ? 'changed' : 'locked';
+  say(`${color.green(what)} ${color.dim(identityFile())}`);
+  say(
+    color.dim(
+      before.protection === 'none'
+        ? 'Both files were readable by anyone who could read the directory. They are not now.'
+        : `The key was held by ${describeProtection(before.protection)}. It is a passphrase now.`,
+    ),
+  );
+  say(color.dim('Every command from here asks for it once.'));
+  if (jsonMode) emit({ protection: 'pass', vaultFile: vaultFile() });
+  return 0;
+}
+
+async function cmdUnlock() {
+  const state = await vaultState();
+  if (state.protection !== 'pass') {
+    say(`${color.dim('nothing to unlock.')} At rest, this identity is ${describeProtection(state.protection)}.`);
+    say(color.dim(`Only a passphrase can be removed, and there is none. ${color.bold(`${cmd()} id`)} shows the state.`));
+    if (jsonMode) emit({ protection: state.protection, changed: false });
+    return 0;
+  }
+
+  // Resolving the identity token is what asks for the current passphrase, and
+  // getting it wrong stops here, before anything is written.
+  const { descriptor, key } = await plainOrKeychainDescriptor();
+  await reprotect({ descriptor, key });
+
+  say(`${color.green('unlocked')} ${color.dim(identityFile())}`);
+  say(
+    color.dim(
+      descriptor.protection === 'none'
+        ? 'There is no keychain on this machine, so both files are now plain. Anyone who copies them can be you.'
+        : `The key is held by ${describeProtection(descriptor.protection)} now, and nothing will ask you for it.`,
+    ),
+  );
+  if (jsonMode) emit({ protection: descriptor.protection, changed: true });
   return 0;
 }
 
@@ -1663,11 +1879,17 @@ async function main() {
       return cmdId(opts);
     case 'peers':
       return cmdPeers(opts, rest);
+    case 'lock':
+      if (rest.length > 0) usageError(`lock takes no arguments, got ${rest[0]}`);
+      return cmdLock(opts);
+    case 'unlock':
+      if (rest.length > 0) usageError(`unlock takes no arguments, got ${rest[0]}`);
+      return cmdUnlock();
     default:
       usageError(
         `unknown command ${command}`,
-        `There are five:  ${color.bold('recv')}, ${color.bold('send')}, ${color.bold('chat')}, ` +
-          `${color.bold('id')}, ${color.bold('peers')}.`,
+        `There are seven:  ${color.bold('recv')}, ${color.bold('send')}, ${color.bold('chat')}, ` +
+          `${color.bold('id')}, ${color.bold('peers')}, ${color.bold('lock')}, ${color.bold('unlock')}.`,
         `Run  ${color.bold(`${cmd()} --help`)}`,
       );
       return 1;

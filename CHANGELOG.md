@@ -5,6 +5,96 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-08
+
+CLI only. The library API, the wire format and the envelope are byte for byte
+what 0.4.0 shipped, so a 0.5.0 CLI and a 0.4.0 CLI talk to each other. What
+changed is what `ratchet` leaves on your disk.
+
+Until now it left two plain files: an identity holding both secret keys in the
+clear, and a peer list naming everyone you had talked to, with addresses and
+timestamps. Anyone who could read the directory could read both, and copying the
+identity was enough to be you to every peer who had not compared words with you
+by hand. Forward secrecy does not cover that, because the identity key is the one
+key the ratchet never rotates. Both files are now sealed.
+
+### Added
+
+- **The vault.** One key, resolved in this order: the OS keychain, then a
+  passphrase, then nothing. On Windows the keychain is DPAPI, bound to your
+  Windows account. macOS uses `security`, Linux uses `secret-tool`. A backend is
+  only trusted after it has stored 32 random bytes, handed them back, and matched
+  them, so a store that cannot return a key is discarded rather than sealed
+  under. If every backend fails the vault says so in one line and falls back to
+  plain files, which is exactly what 0.4.0 did, so there is no way to be worse
+  off than before.
+- **`ratchet lock`** moves the key from the keychain to a passphrase, asked for
+  once per command. `scrypt` at N=2^18, so 256 MiB and about 1.2 seconds per
+  guess. Memory rather than iterations, because the attacker is a GPU running
+  offline against a copied directory and memory is what a GPU has least of.
+  `ratchet unlock` moves it back.
+- **`RATCHET_PASSPHRASE`** and **`RATCHET_NEW_PASSPHRASE`** for unattended
+  machines. Reading a passphrase from a non-TTY stdin is refused rather than
+  silently swallowing the next line of somebody's script.
+
+### Changed
+
+- **The identity file is encrypted at rest.** XChaCha20-Poly1305 under a key
+  derived from the vault key, with the protection mode bound as associated data
+  so editing the header fails authentication instead of producing a confusing
+  decrypt error. A plain identity from any earlier version is detected, sealed in
+  place, and the user is told once. Your six words do not change.
+- **`peers.json` is a sealed store.** Each row is an independent envelope. The
+  row name is an HMAC under a vault subkey, not a plain hash, because a salt
+  sitting in the same file only stops a precomputed table: it does nothing
+  against someone holding one specific public key who just hashes it with the
+  salt they can read. Keying it means that question cannot be asked without the
+  vault key. Addresses are sealed rather than hashed, because an IPv4 address is
+  one of 2^32 and a hash of it with a readable salt is recovered in seconds, so
+  hashing would have looked like protection and provided almost none. Bodies are
+  padded to 256 byte blocks and the salt is fresh on every write, so two copies
+  of one store do not correlate row by row.
+- **Timestamps coarsen to the day on the way to disk.** Day resolution answers
+  both questions the file exists to answer, "recently?" and "how long have I
+  known this key". Millisecond resolution also answered "when is this person at
+  their desk", which nobody asked it. In-memory values keep full resolution.
+- **`ratchet id --reset` now discards the peer list too**, and says so before
+  asking for `--yes`. Those rows were collected under the identity being
+  destroyed and they are the only thing in `RATCHET_HOME` that names anybody.
+  Keeping them meant "start over" quietly kept a dated list of who this machine
+  had talked to.
+- `ratchet id` gained one line reporting the protection state, and prints the fix
+  underneath when it is `unprotected`.
+
+### What this does not protect against
+
+The keychain key is reachable by anything running as you, including a malicious
+`postinstall` in an unrelated package. That is what `ratchet lock` is for, and
+only while the process is not running. The keychain path defends against a copied
+folder, a backup, a synced directory, another user on the box, and a disk pulled
+from a machine whose account password is unknown.
+
+An attacker holding both files and no key still learns that ratchet is installed,
+the exact number of peers, which protection mode is in force, and the file
+mtimes, which give last-write times at second resolution and so partially undo
+the day coarsening. Coarsening mtimes was considered and rejected: `rsync` and
+most backup tools compare size and mtime, so two same-day saves with the same
+peer count would be silently skipped, and losing a backup is a worse outcome than
+leaking a timestamp that filesystem forensics would surrender anyway. They learn
+no public key, no words, no label, no address, no date, and not which peers are
+verified.
+
+macOS and Linux keychain support is written to the documented `security` and
+`secret-tool` interfaces and has not been run on either platform. The
+enroll-and-verify round trip means the failure mode is falling back to plain
+files with a message, which is 0.4.0's behaviour, not a lockout.
+
+### Fixed
+
+- `cli/vault.mjs` was written by a build step while `npm publish` was reading the
+  working tree, so 0.4.0's tarball carries a file that is in no commit and that
+  nothing imports. It is inert. It is tracked from this release on.
+
 ## [0.4.0] - 2026-08-08
 
 **Breaking. The wire format changed and 0.3.x peers cannot read it.** A 0.3.x
