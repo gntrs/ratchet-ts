@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-08-08
+
+### Added
+
+- `hashBackend()` and `hashReady()` are now exported from the package.
+
+  The 0.3.3 notes said they were. They were not. Both functions existed in
+  `src/hash.ts` and neither was re-exported from the index, so `import
+  { hashBackend } from 'ratchet-ts'` was `undefined` in the published 0.3.3
+  tarball. Caught by installing 0.3.3 from the registry and asking it which
+  backends were live: it answered for the AEAD and the curves and had nothing
+  to say about the hashes.
+
+  Worth having rather than just worth correcting. The chain step is two
+  HMAC-SHA256 per message in each direction, which is the most frequently
+  executed primitive in the library, and on the JavaScript path it measured at
+  roughly a third of the cost of sealing a chat sized message. A machine that
+  reports `noble` here while `node:crypto` is available has had the native
+  probe reject it, and is paying that on every message with nothing on screen
+  to say so.
+
+Nothing else changed. Same wire format, same behaviour, same 179 tests.
+
 ## [0.3.3] - 2026-08-08
 
 Same wire format, byte for byte, and the same public API plus three additive
