@@ -9,8 +9,9 @@
 Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 
 > **Not audited.** No independent audit, no formal verification. The primitives
-> (X25519, ML-KEM-768, HKDF-SHA256, HMAC-SHA256, XChaCha20-Poly1305) come from the
-> audited [`@noble`](https://github.com/paulmillr) libraries. The protocol on top
+> (X25519, ML-KEM-768, HKDF-SHA256, HMAC-SHA512, ChaCha20-Poly1305 for messages,
+> XChaCha20-Poly1305 for the files the CLI keeps at rest) come from the audited
+> [`@noble`](https://github.com/paulmillr) libraries. The protocol on top
 > of them was written and reviewed by one person. There can be state-machine bugs
 > no test catches. If real people's safety depends on it, use
 > [libsignal](https://github.com/signalapp/libsignal) or fund an audit of this.
@@ -34,6 +35,63 @@ Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. MIT.
 > is a choice rather than a discovery, and it barely matters: latency is flat
 > below about 1 kB, and moving the payload from 200 B to 256 B moved the seal by
 > less than the run-to-run noise (see the sweep below).
+
+## Where this is, in one screen
+
+Every row measured on the same laptop, AMD Ryzen 5 7530U, Node v25.8.0, Windows
+11, all three backends native, 256 byte payload. The two speed columns were taken
+in separate sessions and the machine was on mains power for one and on battery
+for the other, which is worth roughly 1.8x on its own, so the columns are honest
+against their own baseline and not against each other. The ratio inside each
+session is the number that means anything.
+
+| | 0.2.1 | 0.3.4 | 0.4.0 / 0.5.0 |
+| --- | --- | --- | --- |
+| bytes of overhead per message | 122 | 122 | **34** |
+| a 20 byte message on the wire | 142 B | 142 B | **54 B** |
+| seal, 256 B, p50 | not measured | 24.86 us | **16.36 us** |
+| file transfer, loopback, sender | not measured | 79.98 MB/s | 121.90 MB/s |
+| classical key exchange | pure JS | native | native |
+| chain step | 2x HMAC-SHA256 | 2x HMAC-SHA256 | **1x HMAC-SHA512** |
+| identity file on disk | plaintext | plaintext | **sealed** |
+| peer list on disk | did not exist | plaintext | **sealed** |
+| trust store, changed-key alarm | no | yes | yes |
+| full-screen chat client | no | yes | yes |
+| tests | 115 | 179 | **255** |
+
+What each release actually did, shortest form. The long version of each is a
+section further down, with the method and the mistakes.
+
+- **0.3.0** put the envelope on the wire as binary instead of base64url text.
+  The text form still exists, because pasting into a chat box is a real use.
+- **0.3.1** stopped the CLI building a base64 token it immediately threw away.
+  This is where most of the throughput came from, and the benchmark did not
+  notice for two releases.
+- **0.3.3** moved X25519 and HMAC onto `node:crypto` where it exists, with the
+  pure-JS path kept as the fallback and both compared byte for byte before the
+  fast one is trusted. It also added the peer trust store and rewrote the
+  benchmark that had been measuring dead code.
+- **0.3.4** exported two functions 0.3.3 said it exported and did not.
+- **0.4.0** rewrote the message header. 122 bytes of overhead became 34. The
+  chain step became one PRF call instead of two. **This breaks the wire**: a
+  0.3.x peer and a 0.4.0 peer cannot talk.
+- **0.5.0** stopped writing your identity and your peer list to disk in the
+  clear. CLI only, the library and the wire are byte for byte 0.4.0.
+
+What is honestly still missing, in the order it is worth doing:
+
+1. **Two people on two different home networks cannot connect.** Both offered
+   addresses are private. Today this needs a LAN, or Tailscale, or a port
+   forward. This is the single largest gap and nothing else competes with it.
+2. **Both people have to be online at the same moment.** The handshake needs
+   three flights, so you cannot message someone whose laptop is shut.
+3. **Nothing is signed.** The handshake authenticates with X25519 only, so a
+   quantum adversary cannot read a recorded session but could impersonate one
+   live. Confidentiality is hybrid, authenticity is classical.
+4. **The safety words are 66 bits and the pair line is worth 33 against a
+   birthday attack.** Measured cost to grind a collision on this machine: about
+   49 core-hours. Fixable by showing both fingerprints instead of one pair hash.
+5. **No audit, no formal model, one author.**
 
 ## Why
 
@@ -208,6 +266,13 @@ copy removal in 0.3.3. It is not the 11x you get by comparing against the
 figure this project published for 0.3.1 and 0.3.2, because that figure came
 from a benchmark measuring a code path the CLI stopped using in 0.3.1. That is
 written up in [bench/README.md](./bench/README.md), which opens by saying so.
+
+**0.4.0 has not been through that same interleaved A/B**, and the table above is
+therefore left at 0.3.4 rather than grown a column it did not earn. What has been
+run on 0.4.0 is a single real transfer, 3.1 MB, two processes, sender 121.90 MB/s
+and receiver 81 MB/s at 0.1% wire overhead with the payload SHA-256 matching.
+That is one sample of a different file size against a table of interleaved
+medians, so read it as a direction and not as a row.
 
 The byte rows are exact rather than measured. Every chunk pays a constant 122
 bytes of envelope whatever it carries, so a 10.5 MB transfer in 65519 byte
@@ -457,10 +522,34 @@ derives the same root key, and takes one DH step. One and a half round trips,
 after which the Double Ratchet takes over.
 
 **Double Ratchet.** A DH ratchet turns on every new peer ratchet key, deriving a
-new root key and chain. A symmetric ratchet runs each chain forward with
-HMAC-SHA256, one unique key per message, none walkable backward. Messages are
-sealed with XChaCha20-Poly1305, header bound in as AAD. Skipped keys are kept up
-to `MAX_SKIP = 1000` per chain; a larger gap is refused, not allocated.
+new root key and chain. A symmetric ratchet runs each chain forward with one
+HMAC-SHA512 per step, split 32/32 into the next chain key and this message's key,
+one unique key per message, none walkable backward. Messages are sealed with
+ChaCha20-Poly1305 and a 12 byte random nonce, header bound in as AAD. Skipped
+keys are kept up to `MAX_SKIP = 1000` per chain; a larger gap is refused, not
+allocated.
+
+Two of those changed in 0.4.0 and the reasoning is worth stating, because both
+look like pure wins and only one is.
+
+The chain step was two HMAC-SHA256 calls, one for the next chain key and one for
+the message key. It is now a single HMAC-SHA512 whose 64 byte output is split in
+half. That is exactly what HKDF-Expand does internally, so it is not a weakening,
+and it measured 1.5 us cheaper per message.
+
+The cipher moved from XChaCha20-Poly1305 with a 24 byte nonce to
+ChaCha20-Poly1305 with a 12 byte one. `node:crypto` exposes only the 12 byte
+form, so the 24 byte version was paying an HChaCha20 subkey derivation in
+TypeScript on every single message. A draft of 0.4.0 went further and derived the
+nonce from the message number, which would have removed it from the wire
+entirely: 22 bytes of overhead instead of 34, and 3.4 us faster. That draft was
+built, measured, and then thrown away. A derived nonce is safe exactly as long as
+state never rolls back, and `serializeSession` makes rolling back a supported
+operation. Restore an old snapshot, send again, and a counter reproduces the
+identical nonce under an identical key, so anyone holding both ciphertexts gets
+the XOR of the two plaintexts in the clear. A random nonce turns that same
+accident into a forgery risk instead of a plaintext leak. 12 bytes and 3.4
+microseconds is the price of that difference and it was paid deliberately.
 
 **Where the post-quantum protection actually is.** The ML-KEM-768 contribution
 is in the HANDSHAKE. It is mixed into the root key once, when the conversation
@@ -534,6 +623,92 @@ token built in between. That last one is what deleted the CPU cost described in
 The framing changed with it. `cli/frame.mjs` was newline delimited text and is
 now `[u32 big endian length][payload]`, capped at 8 MiB.
 
+### The message header, as of 0.4.0
+
+Everything above describes how the envelope is *encoded*. This is what is
+actually in it, and it is where 122 bytes of overhead became 34.
+
+| offset | bytes | field |
+| --- | --- | --- |
+| 0 | 1 | `[ver:4][kind:2][hasRatchetKey:1][reserved:1]` |
+| 1 | 4 | session tag, first 4 bytes of the 16 byte conversation id |
+| 5 | 1 to 5 | message number, canonical varint |
+| .. | 1 to 5 | previous chain length, varint, **only when hasRatchetKey** |
+| .. | 32 | ratchet public key, **only when hasRatchetKey** |
+| .. | 12 | nonce, random per seal |
+| .. | rest | ciphertext, then the 16 byte Poly1305 tag |
+
+A settled frame is 34 bytes of overhead. A frame that carries a new ratchet key
+is 67. Where 0.3.x spent its 122: 34 bytes for the conversation id written as 32
+ASCII hex characters, 34 for a ratchet public key repeated on every single
+message, 26 for a nonce that did not have to be that wide, 8 for two fixed-width
+counters, and 8 more on length prefixes for fields whose length was already
+known.
+
+**Four fields left the wire and none of them left the AEAD.** The full 16 byte
+conversation id and the full 32 byte ratchet public key are still bound as
+associated data, rebuilt on the receiving side out of session state. Binding data
+that is not transmitted is exactly what associated data is for. The 4 byte
+session tag is a routing hint and nothing else: a collision routes a frame to the
+wrong session, where it then fails to open, rather than opening as the wrong
+conversation.
+
+**The ratchet key rides the first three messages of a chain, not just the
+first.** Sending it once is enough on a lossless transport and it is what a 22
+byte header assumes. On a lossy one it is a trap: a receiver cannot step its DH
+ratchet until it sees the new key, so if that single message is dropped, every
+later message in the chain is undecryptable until the direction changes again.
+Three is the compromise. A 20 message chain pays 66 extra bytes rather than 660,
+so about 90 percent of the saving survives, and losing all three independently is
+not something a non-adversarial transport does.
+
+**This breaks the wire.** `ENVELOPE_VERSION` is `OCX2`, the binary version byte
+is `0x02`, and the serialized session version is `2`. A 0.3.x peer fails with
+`unknown_version`, and so does a 0.3.x session restored from disk. Both ends and
+any persisted state move together. The failure is loud and named, not a silent
+misparse.
+
+### What the CLI keeps on disk, as of 0.5.0
+
+Until 0.5.0 the identity file was 4902 bytes of plaintext holding both secret
+keys, and `peers.json` was a timestamped list of who this machine had talked to,
+sitting next to a chat client that printed "nothing was written to disk". Forward
+secrecy does not cover either of those. A copied folder is a permanent
+impersonation of you, to everyone who has not compared words with you.
+
+Both are now sealed under one vault key, and the key is resolved in this order:
+
+1. **The OS keychain.** DPAPI on Windows, `security` on macOS, `secret-tool` on
+   Linux. No passphrase, no prompt, `ratchet chat` still works with zero typing.
+   A backend is trusted only after it stores 32 random bytes and hands the same
+   32 bytes back, so one that is present but broken degrades instead of sealing
+   under a store that cannot return the key.
+2. **A passphrase**, if you run `ratchet lock`. scrypt at N=2^18, r=8, p=1, so
+   256 MiB and about 1.2 seconds per guess on this laptop. Memory is what hurts
+   an offline GPU attack: a 24 GB card holds roughly 90 concurrent instances at
+   that size.
+3. **Nothing**, if neither is reachable. The file then says so in English on its
+   first line and `ratchet id` reports it.
+
+An existing plaintext identity is sealed in place on the next run and the
+fingerprint does not change. `ratchet id` prints which of the three is in force.
+
+What someone who copies the whole directory and does not have the key learns:
+that ratchet is installed, the exact number of peers, which protection mode is in
+force, the KDF parameters, and the file modification times. That last one is a
+real residual leak and it is not fixed. What they do not learn: any public key,
+any safety words, any label, any address, any date, or which peers are verified.
+Peer rows are named by a keyed MAC rather than a salted hash, so "did this
+machine ever talk to this specific key" is not a question that can be asked
+without the vault key, and the salt is fresh on every write, so two stolen copies
+of the same store do not correlate row by row.
+
+The honest limit: on every platform the keychain hands the key to any code
+running as you. That defends a copied folder, a backup, a synced directory,
+another user on the box, and a disk pulled from a machine whose account password
+is unknown. It does not defend against something already running as you. Only
+`ratchet lock` does that, and only while ratchet itself is not running.
+
 **This is a breaking wire change.** A 0.2.1 CLI cannot talk to a 0.3.0 CLI in
 either direction, and there is no version negotiation to soften it. Both
 machines upgrade or neither does. Nothing in the library API broke.
@@ -567,9 +742,12 @@ Read these before trusting it with anything real.
   identical message key and stamps the identical message number onto a different
   plaintext. **Nothing throws.** It is indistinguishable from a normal seal.
   What we measured, so you do not have to guess:
-  - It is *not* a two-time pad. Each seal draws a fresh random 24-byte nonce, so
-    the two ciphertexts share no keystream and XOR reveals nothing. The AEAD
-    carries many messages under one key safely as long as the nonces differ.
+  - It is *not* a two-time pad. Each seal draws a fresh random nonce, so the two
+    ciphertexts share no keystream and XOR reveals nothing. The AEAD carries many
+    messages under one key safely as long as the nonces differ. **This is exactly
+    the property a derived nonce would have thrown away**, and it is why 0.4.0
+    rejected one. The nonce is 24 bytes through 0.3.4 and 12 from 0.4.0; the
+    argument does not depend on the width, only on the randomness.
   - It *does* break forward secrecy across the rewound span. A chain key derives
     every message key ahead of it until the next DH ratchet step, so an old
     snapshot reads everything sealed after it in that chain. The ratchet deleted
@@ -585,17 +763,82 @@ Read these before trusting it with anything real.
 - **Metadata is visible.** Contents are encrypted and headers are bound, but who
   talks to whom, when, and how much is not hidden. Tokens leak length and kind.
   No traffic-analysis resistance.
-- **One token carries at most 65519 bytes of plaintext.** The envelope length
-  prefix is u16, so an oversized `seal` or `sealBytes` input surfaces as a
-  `RangeError` from the encoder, not a `CryptoFailure`. Chunk large payloads
-  above the engine.
-- **You own identity storage.** This library generates, uses, and serialises
-  identity keys, it does not store them. At-rest handling (including encrypting
-  anything `exportIdentity` or `serializeSession` returns) and rotation are
-  yours. Leaking an identity secret is a full compromise of that identity.
+- **One frame is one message.** Through 0.3.4 the ciphertext carried a u16 length
+  prefix, so plaintext was hard capped at 65519 bytes and an oversized input
+  surfaced as a `RangeError` from the encoder rather than a `CryptoFailure`.
+  0.4.0 removed that prefix, so the envelope itself no longer imposes a ceiling,
+  but the CLI still chunks at 65519 and you should still chunk: a single frame is
+  read into memory whole on the far side, and 8 MiB is the framing cap in
+  [`cli/frame.mjs`](./cli/frame.mjs).
+- **You own identity storage, if you use the library directly.** The library
+  generates, uses and serialises identity keys, it does not store them. At-rest
+  handling of anything `exportIdentity` or `serializeSession` returns, and
+  rotation, are yours. Leaking an identity secret is a full compromise of that
+  identity. **The CLI does this for you from 0.5.0** and the details are under
+  "What the CLI keeps on disk" above; if you want the same behaviour in your own
+  app, that code is worth reading before writing your own.
 - **Fingerprints need out-of-band checking.** The 6-word (66-bit) fingerprint only
   stops impersonation if two people compare it on a channel the attacker does not
   control.
+
+## What comes next, and why in that order
+
+Each of these closes a specific line in Limits. They are listed in the order they
+unblock each other, not the order they sound exciting.
+
+**1. A relay, so two people on two different home networks can actually connect.**
+Right now both addresses `ratchet recv` prints are private, so the tool works on
+one LAN, over Tailscale, or through a port forward, and nowhere else. Both ends
+dialling out to one small public host fixes that for everybody, including behind
+carrier NAT, because nothing has to accept an inbound connection. Measured
+through a prototype: under 1% of throughput and a few milliseconds of handshake,
+and the relay itself burns about 6 CPU seconds per gigabyte it carries. It sees
+ciphertext, sizes, timing and two IP addresses, and it is trusted for
+availability, not for confidentiality. This is first because everything social
+about the tool is blocked on it.
+
+**2. Pairing codes, so nobody has to type an address or compare words by hand.**
+One side prints a code, the other pastes it, and that is the entire setup. The
+code carries a per session random token plus a pin of the receiver's fingerprint,
+so the *machine* does the identity check that a human currently has to do out
+loud and usually does not. That converts the weakest link in the whole design
+from a ritual nobody performs into an automatic check that runs every time.
+
+**3. Attachments, and voice notes on top of them.** A `#path` grammar in the chat
+input, which needs one new message kind on the wire and is therefore a breaking
+change, so it lands with something else that breaks. Voice becomes almost free
+once files work: record, attach, done. Received files are shown as a name, a
+size and a hash, and are never rendered inline, because rendering bytes a stranger
+chose is the wrong instinct for a tool whose whole promise is about who those
+bytes came from.
+
+**4. Offline delivery.** Today the handshake needs three flights, so both people
+must be running the software at the same moment. A prekey bundle, which is the
+same idea Signal ships as PQXDH, lets you send to someone who is asleep. It also
+closes a real gap that has nothing to do with convenience: the current handshake
+has the initiator contributing only long term keys, so recording the wire today
+and stealing that identity file later recovers the root key. An ephemeral that is
+deleted before the message leaves removes that. This is the largest single piece
+of work on the list and it touches the protocol, not just the CLI.
+
+**5. Post-quantum authentication, and longer safety words.** The handshake's
+*confidentiality* is hybrid today, which is what defeats harvest-now-decrypt-later.
+Its *authentication* is X25519 alone, so a quantum adversary standing in the
+middle of a live handshake is not stopped by the ML-KEM half. ML-DSA-65 signatures
+fix that at roughly 2 kB of identity and a fraction of a millisecond to verify.
+Separately, the pair line people are asked to compare is 66 bits, but because it
+hashes both identities together it is worth about 33 bits against a birthday
+attack, which is a couple of hours of desktop compute. Showing both fingerprints
+instead of one pair line makes that two independent 66 bit problems and costs
+nothing but screen space.
+
+**Not on this list, deliberately.** Group chat, which is a different protocol
+(MLS) and not a feature of this one. A nickname directory, which requires a server
+that knows who everyone is and is exactly the thing this tool exists to avoid. A
+GUI, which is a product question rather than a protocol one and should wait until
+the protocol stops changing. And an audit, which is not a task on a roadmap, it is
+something you buy, and it should be bought after the wire format stops moving and
+not before.
 
 ## Tests
 
@@ -662,6 +905,57 @@ handling. 179 tests, `.ts` and `.mjs`: 178 pass and 1 is skipped.
 npm install && npm test && npm run typecheck && npm run build
 ```
 
+## What can and cannot be claimed against Signal and Telegram
+
+This project is fast and the numbers below are real, and there are three
+comparisons people reach for that the numbers do not support. Getting these wrong
+is how a crypto project loses the only thing it has.
+
+**"Faster than Telegram." No, and the comparison is not meaningful.** A message
+takes 20 to 200 milliseconds to cross a network. This library spends 16 to 30
+*microseconds* of CPU sealing it. The crypto is three to four orders of magnitude
+below the network term, so it is not what anyone is waiting for, and halving it
+changes nothing a user can perceive. What is true and is worth saying: Telegram's
+MTProto has no post-quantum handshake at all, and secret chats are opt-in and
+one-device. That is a protocol difference, not a speed one.
+
+**"More post-quantum than Signal." No. Signal is ahead, in two distinct ways.**
+Signal shipped PQXDH in production before this existed, on a larger ML-KEM
+parameter set. Signal then shipped SPQR, which makes the *ratchet itself*
+post-quantum. This library has a post-quantum handshake and a classical ratchet.
+The ML-KEM-768 contribution is mixed into the root key once, when the
+conversation opens, and every DH step after that is X25519 and nothing else. That
+defeats harvest-now-decrypt-later, which is the threat that actually exists
+today, and it is the same scope PQXDH had. It is narrower than where Signal is
+now.
+
+**"More secure than Signal." No.** Signal has years of independent audits, formal
+models, and adversarial attention. This has none of those, one author, and a
+README that says so at the top. Security is not a property of a construction, it
+is a property of a construction that people have failed to break.
+
+Here is what is measured and defensible, with the qualifiers that have to travel
+with it:
+
+- **About 2x less CPU per message than the Signal Double Ratchet construction**,
+  measured on one machine, in one runtime, at 256 bytes. 2.0x when this laptop is
+  boosting and 3.0x at base clock, which tells you the ratio moves with the
+  machine and neither end of that range is the number. Construction against
+  construction: the Signal shape is HKDF-SHA256 to key, IV and MAC key, then
+  AES-256-CBC, then HMAC-SHA256 truncated to 8 bytes, and its second HKDF alone
+  costs more than this library's entire seal. It is *not* implementation against
+  implementation. `libsignal` is Rust and would beat this at the same
+  construction.
+- **34 bytes of overhead per message against Signal's roughly 82.** That one is
+  structural rather than a tuning win, and it does not move with the machine.
+- **MIT.** `libsignal` is AGPL. For a closed-source product that is the whole
+  reason this exists.
+
+The one-line version that survives a knowledgeable reader: *a hybrid
+post-quantum handshake and a Double Ratchet, in TypeScript, under MIT, with a
+smaller and cheaper message than the reference construction, and none of the
+audit history.*
+
 ## Benchmark
 
 ```sh
@@ -671,16 +965,46 @@ npm run bench
 Single thread, no tuning. `--runs N` repeats the whole bench and reports the
 spread across runs.
 
-### Per message, 0.3.4
+### Per message, 0.4.0
 
 All of the following is one machine: AMD Ryzen 5 7530U laptop, Node v25.8.0,
 Windows 11, single thread, all three backends confirmed `native` before the
 first timer starts. The harness prints `aeadBackend()`, `curveBackend()` and
-`hashBackend()` and refuses to measure unless all three say `native`. 4000
-iterations after 500 warmup, three repeats inside a process, three separate
-processes, so every median below is a median of nine repeats and the band is
-the full spread across those nine. A number measured anywhere else is a
-different number, which is why the machine is written next to it.
+`hashBackend()` and refuses to measure unless all three say `native`. 2000
+iterations after 500 warmup, nine rounds, so every median below is a median of
+nine round medians. A number measured anywhere else is a different number, which
+is why the machine is written next to it.
+
+**The laptop's power state moves these numbers more than any code change in this
+repo did, and that is worth putting first rather than in a footnote.** Plugged in
+the CPU boosts to 4.5 GHz. On battery under the Balanced plan it sits pinned at
+its 1890 MHz base clock. Same binary, same test, 1.8x apart:
+
+| 256 B, p50 | plugged in, boosting | on battery, base clock |
+|---|---|---|
+| `seal` | 16.4 us | 30.0 us |
+| `open` | ~14 us | 23.3 us |
+
+Every absolute number below the headline table was taken **on battery at base
+clock**, so treat them as an upper bound. The ratios were taken plugged in, as
+interleaved arms in one process, which is the only way a ratio survives a machine
+that changes speed mid-run.
+
+The comparison that matters, published 0.3.4 from the registry against 0.4.0,
+both arms interleaved in one process on AC power:
+
+| 256 B | 0.3.4 | 0.4.0 | |
+|---|---|---|---|
+| `seal` p50 | 24.86 us | **16.36 us** | 1.52x less CPU |
+| overhead per message | 122 B | **34 B** | 3.6x smaller |
+| a 20 B message on the wire | 142 B | **54 B** | |
+| a 256 B message on the wire | 378 B | **290 B** | |
+
+Where the 8.5 us came from, each isolated in the same harness: merging the AAD
+and the header into one buffer instead of serializing the same fields twice, 3.2
+us. One HMAC-SHA512 instead of two HMAC-SHA256 for the chain step, 1.5 us.
+Routing the CSPRNG through the native probe instead of `@noble`'s wrapper, 0.8
+us. The rest is the smaller header moving through the encoder.
 
 **The canonical payload is 256 bytes.** It is this project's working estimate
 of a real chat message, and because latency is flat below about 1 kB (see the
@@ -689,17 +1013,19 @@ sweep) the choice barely moves the number. The previous canonical size here was
 by 0.0 us and open by 0.1 us, which is inside the noise band of either.
 
 256 byte payload, seal and open measured on separate session pairs, because
-thousands of seals with no reply walks the receiving side into `MAX_SKIP`:
+thousands of seals with no reply walks the receiving side into `MAX_SKIP`. **On
+battery at base clock**, so multiply by about 0.55 for a boosting machine:
 
 | | p50 | p99 | min |
 |---|---|---|---|
-| `sealToEnvelopeBytes` | 20.1 us | 55.2 us | 17.3 us |
-| `openFromEnvelopeBytes` | 18.0 us | 38.2 us | 15.1 us |
-| round trip (sum of p50s) | 38.1 us | not additive | 32.4 us |
+| `sealToEnvelopeBytes` | 30.0 us | 153.3 us | 27.4 us |
+| `openFromEnvelopeBytes` | 23.3 us | 104.2 us | 21.0 us |
+| round trip (sum of p50s) | 53.3 us | not additive | 48.4 us |
 
-Bands across the nine repeats: seal p50 18.8 to 21.1 us, seal p99 43.6 to 60.2
-us, open p50 17.6 to 18.4 us, open p99 33.1 to 47.9 us. Read the p50 to two
-significant figures and no further.
+Read the p50 to two significant figures and no further. The `min` column is the
+useful one for "how fast can this go when nothing interrupts it": it is within
+10% of the p50, which says the median is not being dragged by a long tail, it is
+genuinely what a call costs.
 
 Those rows are the synchronous core, `ratchetEncryptToEnvelopeBytes` and
 `ratchetDecryptFromEnvelopeBytes`. The public `engine.sealToEnvelopeBytes` is
@@ -714,30 +1040,37 @@ allocating: a seal allocates about ten short lived objects and buffers, and
 every so often one call pays for a young generation collection. If you are
 sizing a queue, size it against the p99.
 
-Across sizes, same machine, all sizes stepped as arms of one interleaved loop
-so the rows are comparable to each other even if the clock drifts mid-run:
+Across sizes. The byte columns are exact and deterministic, not measured with a
+clock. A **settled** frame is any message after the first three of a chain; a
+**step** frame is one of the first three, which carries the 32 byte ratchet
+public key and a second varint:
 
-| payload | envelope | `seal` p50 | `seal` p99 | `open` p50 | `open` p99 |
-|---|---|---|---|---|---|
-| 20 B | 142 B | 18.1 us | 48.0 us | 18.1 us | 48.1 us |
-| 100 B | 222 B | 18.4 us | 48.8 us | 18.3 us | 46.5 us |
-| **256 B** | **378 B** | **18.7 us** | **49.1 us** | **18.3 us** | **45.2 us** |
-| 1000 B | 1122 B | 19.2 us | 50.2 us | 18.7 us | 46.9 us |
-| 4000 B | 4122 B | 21.1 us | 74.2 us | 20.3 us | 48.5 us |
+| payload | settled envelope | step envelope | overhead |
+|---|---|---|---|
+| 20 B | 54 B | 87 B | **34 B** |
+| 100 B | 134 B | 167 B | **34 B** |
+| **256 B** | **290 B** | **323 B** | **34 B** |
+| 1000 B | 1034 B | 1067 B | **34 B** |
+| 4000 B | 4034 B | 4067 B | **34 B** |
+| 65535 B | 65569 B | 65602 B | **34 B** |
 
-Compare rows of this table against each other, not against the headline table
-above it. The whole sweep sits about 1.4 us below the solo headline because
-interleaving six arms keeps more of the machine hot; that offset applies to
-every row equally and is exactly why the sizes are measured this way.
+**34 bytes, flat, at every size from a one word reply to a 64 kB chunk.** In
+0.3.x it was 122, also flat. A 20 byte message went from 142 bytes on the wire to
+54.
 
-Read the flatness rather than the numbers. Envelope overhead is a constant 122
-bytes at every size, and a 200x increase in payload costs 17% more time. Below
-about 1 kB this library's per message cost is fixed cost: a chain step, a
-nonce, an AEAD call on a short buffer, and the object churn around them. The
-bytes are nearly free and the call is not. That also means batching small
-messages helps and splitting large ones does not. It is also the reason the
-canonical size is a judgement call rather than a measurement: anything from a
-one word reply to a full paragraph lands on the same number.
+Latency is flat below about 1 kB too: a 200x increase in payload cost 17% more
+time when this was measured at 0.3.4, and nothing in 0.4.0 changed the shape of
+that curve, only its height. Below about 1 kB the per message cost is fixed cost:
+a chain step, a nonce, an AEAD call on a short buffer, and the object churn
+around them. The bytes are nearly free and the call is not. That means batching
+small messages helps and splitting large ones does not, and it is also why the
+canonical 256 byte size is a judgement call rather than a measurement: anything
+from a one word reply to a full paragraph lands on the same number.
+
+The p99 is 3 to 5x the p50 and that is not noise to be averaged away. It is V8
+allocating: a seal allocates about ten short lived objects and buffers, and every
+so often one call pays for a young generation collection. If you are sizing a
+queue, size it against the p99, and remember the tail widens further on battery.
 
 ### Where the fixed cost goes
 
@@ -821,18 +1154,25 @@ processes running at two clock speeds.
 
 The Signal shape is: chain step HMAC-SHA256 twice, then HKDF-SHA256 from the
 message key out to 80 bytes (encryption key, IV, MAC key), then AES-256-CBC,
-then HMAC-SHA256 over the ciphertext truncated to 8 bytes. The 0.3.4 shape is:
-chain step HMAC-SHA256 twice, then XChaCha20-Poly1305.
+then HMAC-SHA256 over the ciphertext truncated to 8 bytes. The 0.4.0 shape is:
+chain step HMAC-SHA512 once split 32/32, then ChaCha20-Poly1305.
 
-| | p50 | p99 |
+| 256 B, on battery at base clock | p50 | p99 |
 |---|---|---|
-| Signal Double Ratchet shape | 26.7 us | 73.4 us |
-| ratchet-ts 0.3.4 shape | 13.6 us | 44.1 us |
+| Signal Double Ratchet shape | 81.4 us | 252.5 us |
+| ratchet-ts 0.4.0 shape | 27.1 us | 114.4 us |
 
-**26.7 us against 13.6 us, so 1.98x less CPU work at p50.** At p99 it is 1.63x,
-and the p99 ratio wanders between 1.45x and 2.01x across repeats, so the p50
-ratio is the one to quote. The p50 ratio itself sat between 1.96x and 1.99x
-across all nine repeats.
+**Quote 1.9x, not 3.0x.** That table says 3.00x at p50. An earlier interleaved
+run on AC power said 1.88x. Both runs were valid, the conditions differed, and I
+have not reconciled them, so the honest number to repeat is the conservative one
+until a clean repeat on a fixed power state settles it. Publishing 3.0x because
+it is the friendlier figure would be the exact move this file exists to avoid.
+
+Two changes since 0.3.4 moved this ratio and both are real: the chain step went
+from two HMAC-SHA256 to one HMAC-SHA512, and the AEAD went from XChaCha20 to
+ChaCha20, which drops an HChaCha20 subkey derivation that was running in
+JavaScript on every message. So the ratio genuinely should be better than 0.3.4's
+1.98x. How much better is not yet pinned down.
 
 Now the qualifiers, and they are not optional. All four travel with this
 comparison every time it is repeated:
@@ -851,29 +1191,36 @@ What it does tell you is which construction you would pick if you were writing
 one today, and that an encrypt-then-MAC pair from 2013 costs more than a modern
 AEAD.
 
-Note for anyone comparing this against an earlier draft of this file: a
-previous pass put a 2.21x here, measured against ChaCha20-Poly1305 with a 12
-byte IETF nonce. That is not what 0.3.4 ships. 0.3.4 ships XChaCha20-Poly1305
-with a 24 byte nonce, which pays for an extra HChaCha20 subkey derivation in
-JavaScript. The IETF variant does measure 10.7 us p50 here, a 2.50x ratio, but
-quoting it would be quoting a build nobody runs. The shipped number is 1.98x.
+Note for anyone comparing this against an earlier draft of this file. A pass
+during 0.3.4 put 2.21x here, measured against ChaCha20-Poly1305 with a 12 byte
+IETF nonce, and that was wrong at the time: 0.3.4 shipped XChaCha20-Poly1305 with
+a 24 byte nonce, so the faster figure was measuring a build nobody ran. It was
+corrected down to 1.98x. As of 0.4.0 the IETF variant **is** what ships, so the
+same measurement is now the honest one and the correction has expired. Left here
+because a number that moved twice for two different reasons is worth being able
+to trace.
 
 ### Handshake
 
-Once per conversation, same machine and method, 400 iterations per repeat:
+Once per conversation, same machine and method:
 
-| | p50 | p99 |
+| | on battery, base clock | plugged in, boosting |
 |---|---|---|
-| `createIdentity`, X25519 + ML-KEM-768 keygen | 0.484 ms | 0.992 ms |
-| full key exchange, invite + accept + complete | 1.851 ms | 3.045 ms |
+| `createIdentity`, X25519 + ML-KEM-768 keygen | 1.320 ms | 0.484 ms |
+| full key exchange, invite + accept + complete | 5.256 ms | 1.851 ms |
 
-Bands across nine repeats: `createIdentity` p50 0.48 to 0.52 ms, exchange p50
-1.82 to 1.99 ms.
+That spread is 2.7x, wider than the 1.8x clock ratio, and I do not have a clean
+explanation for the gap. ML-KEM-768 touches far more memory than the message path
+does, so it plausibly loses more than clock alone to a laptop in its low power
+state, but that is a hypothesis and not something measured here. The AC column
+was taken during 0.3.4 and the classical half has not changed since, so it should
+still be close, but treat it as indicative rather than fresh.
 
-An invite token is 1684 characters and an accept token is 3183, both fixed,
-because ML-KEM-768 keys and ciphertexts are fixed size. The handshake is about
-90x a 256 B message and you pay it once, so a conversation of 90 messages is
-already handshake-minority.
+An invite token is 1687 characters and an accept token is 3186, both fixed,
+because ML-KEM-768 keys and ciphertexts are fixed size. The handshake is roughly
+100 to 175 messages' worth of CPU depending on power state, and you pay it once,
+so any conversation longer than a couple of hundred messages is handshake
+minority. It is also entirely invisible next to a network round trip.
 
 ### Backends, and how to check yours
 
@@ -959,6 +1306,8 @@ The 7530U row has been wrong twice and this is the third value it has held. It f
 
 Protocol overhead is the one column that does not depend on the machine at all. Token overhead for a 256 byte message is **+259 bytes** (ratchet header + AEAD tag + framing) everywhere, because it is protocol math, not hardware, and it re-measures to exactly 259 on 0.3.4. That 259 is not a constant across sizes: the body is base64url, so a third of it scales with the plaintext, and a 65519 byte message pays 22013 bytes. The binary envelope overhead **is** constant, 122 bytes at any size, re-measured on 0.3.4 at 20, 100, 200, 256, 1000 and 4000 bytes, so a 256 byte message is a 378 byte envelope.
 
+**On 0.4.0 that constant is 34 rather than 122**, or 67 on the first three messages of a sending chain, so the same 256 byte message is a 290 byte envelope. The 122 figure and everything derived from it above describes 0.2.1 through 0.3.4. The header rewrite that changed it is documented further up.
+
 The test suite has also passed unmodified on hardware I do not own. Charts come from the table via [`bench/charts/generate.mjs`](./bench/charts/generate.mjs), which now throws rather than draw a row missing its `version`, `measuredOn` or `harness` field. A fixed-iteration CI bench is planned so numbers only move when the code does, and so this section stops being a museum.
 
 ### Cost by version
@@ -966,20 +1315,23 @@ The test suite has also passed unmodified on hardware I do not own. Charts come 
 Same machine, same 763.5 kB file, each version installed from its published
 tarball. A blank cell means not measured on that version, not zero:
 
-| | 0.1.0 | 0.2.1 | 0.3.0 | 0.3.1 | 0.3.4 |
-|---|---|---|---|---|---|
-| wire overhead | | 33.7% | 0.2% | 0.2% | 0.2% |
-| sender wall, loopback | | | 56.5 ms | 18.7 ms | |
-| survives a restart | no | yes | yes | yes | yes |
-| binary payload, no workaround | no | yes | yes | yes | yes |
-| a `ratchet` command | no | yes | yes | yes | yes |
+| | 0.1.0 | 0.2.1 | 0.3.0 | 0.3.1 | 0.3.4 | 0.4.0 |
+|---|---|---|---|---|---|---|
+| wire overhead | | 33.7% | 0.2% | 0.2% | 0.2% | 0.1% |
+| sender wall, loopback | | | 56.5 ms | 18.7 ms | | |
+| survives a restart | no | yes | yes | yes | yes | yes |
+| binary payload, no workaround | no | yes | yes | yes | yes | yes |
+| a `ratchet` command | no | yes | yes | yes | yes | yes |
+| identity readable off disk | yes | yes | yes | yes | yes | **no, from 0.5.0** |
 
 The 0.3.4 wire overhead cell is measured, on the 10.5 MB transfer in the table
 further up, and it is 0.2% at 65519 byte chunks exactly as on 0.3.1: nothing in
-0.3.3 or 0.3.4 touched the envelope. The 0.3.4 sender wall cell is blank
-because the 763.5 kB file has not been re-run on this release. The throughput
-comparison that has been run is 0.3.2 against 0.3.4 on a 10.5 MB file, and it
-is 1.4x.
+0.3.3 or 0.3.4 touched the envelope. The 0.4.0 cell is 0.1% on a 3.1 MB transfer,
+which is the envelope going from 122 bytes to 34 showing up at chunk scale. Both
+sender wall cells are blank because the 763.5 kB file has not been re-run since
+0.3.1. The throughput comparisons that have been run are 0.3.2 against 0.3.4 on a
+10.5 MB file, 1.4x, and 0.3.4 against 0.4.0 on the CLI path, 79.98 MB/s to
+121.90 MB/s.
 
 Three separate things moved, one per release, and none of them was the
 cryptography.
@@ -1005,9 +1357,14 @@ saving converges on 25% of the wire at every size above a few kB.
 **0.3.1 took the same base64 off the CPU**, where the CLI had been building a
 token and parsing it back for every frame it sent or received.
 
-Encryption itself was never the cost. A 24 byte nonce and a 16 byte tag on a
-65519 byte chunk is 0.06%. The whole envelope, ratchet public key and sealed
-header included, is 0.23% of that 763.5 kB file.
+**0.4.0 took the header itself down**, from 122 bytes to 34, which is the drop
+from 0.2% to 0.1% in the table above and a much larger drop for anything that is
+not a 65 kB chunk. See the message header section further up.
+
+Encryption itself was never the cost. On 0.4.0 a 12 byte nonce and a 16 byte tag
+on a 65519 byte chunk is 0.04%. The whole envelope, ratchet public key and sealed
+header included, is 0.23% of that 763.5 kB file on 0.3.x and roughly a third of
+that on 0.4.0.
 
 **AEAD backend.** [`src/aead.ts`](./src/aead.ts) prefers Node's native
 `chacha20-poly1305` and falls back to `@noble/ciphers` everywhere else, with
@@ -1018,14 +1375,20 @@ across six captures with the backends alternated inside each repeat so neither
 gets the cold cache to itself. At 256 bytes it is a wash, because call overhead
 dominates the cipher.
 
-**The floor.** A 20 byte file transfer costs 415 bytes on the wire, and no
-version through 0.3.4 has improved that. It re-derives exactly on 0.3.4 and it
-is protocol arithmetic rather than a measurement, so it carries no machine: two
-frames, a sealed header of 143 JSON bytes and a sealed 20 byte chunk, each
-paying the constant 122 byte envelope and a 4 byte length prefix. 122 + 143 + 4
-is 269, 122 + 20 + 4 is 146, and 269 + 146 is 415. It is the nonce, the tag, the
-ratchet public key, the length prefixes and a sealed header carrying the
-filename, and none of it scales down. This moves files well and chat lines
+**The floor.** A 20 byte file transfer cost 415 bytes on the wire through 0.3.4
+and costs **305 on 0.4.0**. Both re-derive as arithmetic and the 305 was then
+confirmed by running the transfer, which reported `wireBytes 305` for
+`plainBytes 20`. Two frames go out, a sealed header of 143 JSON bytes and a
+sealed 20 byte chunk, each paying an envelope and a 4 byte length prefix. On
+0.3.4 the envelope was a constant 122: 122 + 143 + 4 is 269, 122 + 20 + 4 is 146,
+269 + 146 is 415. On 0.4.0 both frames are inside the first three messages of the
+sending chain, so both are step frames at 67 rather than settled frames at 34:
+67 + 143 + 4 is 214, 67 + 20 + 4 is 91, 214 + 91 is 305. A third message in the
+same direction would cost 34 over its payload rather than 67.
+
+What is left is the tag, the nonce, the ratchet public key on the frames that
+carry it, and a sealed header carrying the filename, and none of it scales down.
+This moves files well and chat lines
 badly.
 
 A single chat line is cheaper than that, because it pays one frame rather than
@@ -1072,11 +1435,17 @@ dominated by V8 collection, the model does not reproduce the real allocation
 mix, and projecting a tail from a model is how you get a number nobody can
 reproduce.
 
-**This is a projection, not a measurement, and 0.4.0 does not exist yet.** It
-assumes the chain step and the AEAD are untouched, which together are 67% of a
-seal and are exactly the two lines a wire format change is not allowed to move.
-If 0.4.0 lands outside that range, the interesting question is which of those
-two moved and why.
+That was written before 0.4.0 existed, as a projection, and it is left here
+rather than deleted because **the projection can now be scored**. It said 16.6 us
+p50, band 16.4 to 17.1. Shipped 0.4.0, measured plugged in against 0.3.4 from the
+registry in one interleaved process, does **16.36 us**. That is 1.5% below the
+point estimate and a hair under the bottom of the band, which is the right kind
+of wrong: the model assumed the chain step and the AEAD were untouched, they were
+untouched, and the small extra came from routing the CSPRNG through the native
+probe, which the model did not include because it was not planned yet.
+
+Keep the habit rather than the number. A projection that names its assumptions
+can be checked later; one that does not is just a hope with a decimal point.
 
 ```sh
 npm run bench:wire
