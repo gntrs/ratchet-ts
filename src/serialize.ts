@@ -18,7 +18,7 @@ import { MAX_SKIP } from './ratchet.js';
  * a live session, a pending invite, and the identity itself.
  *
  * Everything serialises to one pasteable ASCII string in the same shape as the
- * wire envelopes, `OCX1.<kind>.<base64url body>`, because a single line of
+ * wire envelopes, `OCX2.<kind>.<base64url body>`, because a single line of
  * text is the lowest common denominator of every storage a caller might have:
  * a database column, localStorage, a file, an environment variable. No caller
  * should ever need to know the body layout.
@@ -52,15 +52,27 @@ import { MAX_SKIP } from './ratchet.js';
  */
 
 /**
- * Format version of the binary body, independent of the outer OCX1 marker.
+ * Format version of the binary body, independent of the outer OCX2 marker.
  * The outer marker names the protocol generation, this byte names the state
  * layout, and the two move at different speeds: a future release can add a
  * session field without touching the wire protocol.
+ *
+ * BUMPED TO 2 IN 0.4.0. A session gained `previousPeerRatchetPublic` and
+ * `peerChainEpoch`, and its `skippedKeys` are keyed by epoch rather than by a
+ * base64 ratchet public key. A version 1 body parsed as version 2 would run off
+ * the end of the buffer or, worse, read a skipped key id under the wrong scheme
+ * and quietly lose every parked key, so it is refused outright. Callers with
+ * stored 0.3.x sessions must re-handshake; there is no migration, because the
+ * chain keys themselves changed KDF and could not be carried across anyway.
+ *
+ * In practice a 0.3.x string fails one step earlier, on the OCX1 marker, with
+ * `unsupported token version OCX1`. This byte is the backstop for anything that
+ * kept the marker and changed the body.
  */
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 
 const CHECKSUM_LEN = 8;
-const CHECKSUM_DOMAIN = utf8ToBytes('OCX1 state checksum v1');
+const CHECKSUM_DOMAIN = utf8ToBytes('OCX2 state checksum v1');
 
 type StateKind = 'session' | 'pending' | 'identity';
 
@@ -221,15 +233,16 @@ function requireLength(value: Uint8Array, expected: number, what: string): void 
 // ---------------------------------------------------------------------------
 
 /**
- * The three optional session fields, packed into one presence byte. A flags
- * byte instead of three separate markers keeps the encoding canonical: there
+ * The four optional session fields, packed into one presence byte. A flags
+ * byte instead of four separate markers keeps the encoding canonical: there
  * is exactly one way to say "no send chain yet", and unknown bits are refused
  * on read so a future flag cannot be silently dropped by an old decoder.
  */
-const FLAG_PEER_RATCHET = 0b001;
-const FLAG_SEND_CHAIN = 0b010;
-const FLAG_RECV_CHAIN = 0b100;
-const KNOWN_FLAGS = FLAG_PEER_RATCHET | FLAG_SEND_CHAIN | FLAG_RECV_CHAIN;
+const FLAG_PEER_RATCHET = 0b0001;
+const FLAG_SEND_CHAIN = 0b0010;
+const FLAG_RECV_CHAIN = 0b0100;
+const FLAG_PREV_PEER_RATCHET = 0b1000;
+const KNOWN_FLAGS = FLAG_PEER_RATCHET | FLAG_SEND_CHAIN | FLAG_RECV_CHAIN | FLAG_PREV_PEER_RATCHET;
 
 /**
  * One conversation's ratchet state as a single storable string.
@@ -254,10 +267,21 @@ const KNOWN_FLAGS = FLAG_PEER_RATCHET | FLAG_SEND_CHAIN | FLAG_RECV_CHAIN;
  *
  * What it does and does not cost, measured rather than assumed:
  *
- *   - It is NOT a two-time pad. The nonce is 24 fresh random bytes per seal,
- *     so the two ciphertexts do not share a keystream and neither one can be
- *     unmasked by XOR. XChaCha20-Poly1305 is built to carry many messages
- *     under one key as long as the nonces differ, and here they do.
+ *   - It is NOT a two-time pad, and that took two attempts to keep. This
+ *     bullet is worth reading with its history attached, because a mid-0.4.0
+ *     build made the opposite true and it was reverted for this paragraph.
+ *     0.3.x drew 24 fresh random bytes per seal, so two branches sealing at the
+ *     same message number produced different keystreams and neither ciphertext
+ *     could be unmasked. The mid-0.4.0 draft derived the nonce from the message
+ *     number and sent nothing, which meant the rewound branch reused the message
+ *     key AND the nonce, and the XOR of the two ciphertexts was the XOR of the
+ *     two plaintexts: both plaintexts recoverable by anyone holding both
+ *     ciphertexts and any crib. The shipped 0.4.0 draws 12 fresh random bytes
+ *     per seal and puts them on the wire, so the two branches share a message
+ *     key but not a keystream. What a rollback costs here is an attacker who can
+ *     forge under a key that was used twice, which is an integrity problem. It
+ *     is not a disclosure of the two plaintexts. That is a bound on the damage
+ *     and not permission to do it: everything below still applies.
  *
  *   - It DOES destroy forward secrecy over the rewound span. The snapshot is a
  *     live chain key, and a chain key derives every message key ahead of it
@@ -291,14 +315,19 @@ export function serializeSession(session: SessionState): string {
   if (session.peerRatchetPublic !== undefined) flags |= FLAG_PEER_RATCHET;
   if (session.sendChainKey !== undefined) flags |= FLAG_SEND_CHAIN;
   if (session.recvChainKey !== undefined) flags |= FLAG_RECV_CHAIN;
+  if (session.previousPeerRatchetPublic !== undefined) flags |= FLAG_PREV_PEER_RATCHET;
   w.u8(flags);
   if (session.peerRatchetPublic !== undefined) w.blob(session.peerRatchetPublic);
   if (session.sendChainKey !== undefined) w.blob(session.sendChainKey);
   if (session.recvChainKey !== undefined) w.blob(session.recvChainKey);
+  if (session.previousPeerRatchetPublic !== undefined) w.blob(session.previousPeerRatchetPublic);
 
   w.u32(session.sendCount);
   w.u32(session.recvCount);
   w.u32(session.previousSendCount);
+  // The epoch counter is what the parked keys below are keyed by, so it has to
+  // survive the round trip or every parked key becomes unreachable.
+  w.u32(session.peerChainEpoch ?? 0);
 
   // Insertion order is preserved through the round trip, so re-serialising a
   // restored session reproduces the identical string.
@@ -335,13 +364,18 @@ export function deserializeSession(value: string): SessionState {
   const peerRatchetPublic = (flags & FLAG_PEER_RATCHET) !== 0 ? r.blob() : undefined;
   const sendChainKey = (flags & FLAG_SEND_CHAIN) !== 0 ? r.blob() : undefined;
   const recvChainKey = (flags & FLAG_RECV_CHAIN) !== 0 ? r.blob() : undefined;
+  const previousPeerRatchetPublic = (flags & FLAG_PREV_PEER_RATCHET) !== 0 ? r.blob() : undefined;
   if (peerRatchetPublic !== undefined) requireLength(peerRatchetPublic, X25519_PUBLIC_LEN, 'peer ratchet public key');
   if (sendChainKey !== undefined) requireLength(sendChainKey, KEY_LEN, 'send chain key');
   if (recvChainKey !== undefined) requireLength(recvChainKey, KEY_LEN, 'receive chain key');
+  if (previousPeerRatchetPublic !== undefined) {
+    requireLength(previousPeerRatchetPublic, X25519_PUBLIC_LEN, 'previous peer ratchet public key');
+  }
 
   const sendCount = r.u32();
   const recvCount = r.u32();
   const previousSendCount = r.u32();
+  const peerChainEpoch = r.u32();
 
   const skippedCount = r.u32();
   // The live engine never parks more than MAX_SKIP keys, so a count above it
@@ -372,10 +406,12 @@ export function deserializeSession(value: string): SessionState {
     sendCount,
     recvCount,
     previousSendCount,
+    peerChainEpoch,
     skippedKeys,
     ...(peerRatchetPublic ? { peerRatchetPublic } : {}),
     ...(sendChainKey ? { sendChainKey } : {}),
     ...(recvChainKey ? { recvChainKey } : {}),
+    ...(previousPeerRatchetPublic ? { previousPeerRatchetPublic } : {}),
   };
 }
 

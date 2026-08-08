@@ -1,7 +1,7 @@
 /**
  * Known-answer vector generator. Run with: npx tsx scripts/gen-vectors.mjs
  *
- * Writes test/vectors.json. The vectors pin the OCX1 handshake and the first
+ * Writes test/vectors.json. The vectors pin the OCX2 handshake and the first
  * ratchet turns to exact bytes, so another implementation can reproduce the
  * protocol from the seeds alone and byte-compare every intermediate value.
  *
@@ -21,7 +21,25 @@
  *     FIPS 203 seed (d || z).
  *   - ML-KEM encapsulation takes its 32 byte message m explicitly, which the
  *     noble API allows, so even the KEM ciphertext is reproducible.
- *   - The conversation id and the AEAD nonces are fixed constants.
+ *   - The conversation id is a fixed constant.
+ *
+ * The nonce is a seed again, and the seed list below says so. A draft of 0.4.0
+ * derived it from the message number, which removed it from this file entirely;
+ * that derivation was rejected, because a session restored from a stale
+ * snapshot replays a message key, and a replayed key under a replayed nonce
+ * hands an observer the XOR of two plaintexts. 0.4.0 ships 12 random bytes on
+ * the wire instead, so the nonce is a random choice once more and a
+ * known-answer file has to pin it like any other.
+ *
+ * THE SEAM, AND WHY IT CANNOT LEAK INTO A REAL SEAL. This script never calls
+ * ratchetEncrypt. It builds the two message tokens out of primitives, the same
+ * way it builds every key above them, and hands chacha20poly1305 a nonce out of
+ * `seeds`. src/ratchet.ts has no parameter, option, or exported hook that would
+ * let a caller supply a nonce: freshNonce() reads the CSPRNG and nothing else,
+ * and it is not exported. So the fixed nonce lives here, in a file that is not
+ * shipped, and there is no code path from a normal seal to it. The check at the
+ * bottom of this script still opens both tokens with the real ratchetDecrypt,
+ * so the receive path is exercised for real even though the send path is not.
  *
  * The seeds are counter patterns (byte i of a seed with offset k is (k + i)
  * mod 256) so a reader can spot at a glance that nothing is hidden in them.
@@ -31,10 +49,15 @@ import { writeFileSync } from 'node:fs';
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import { concat, toHex, utf8ToBytes } from '../src/bytes.js';
-import { decodeEnvelope, encodeEnvelope, messageAad } from '../src/envelope.js';
+import {
+  conversationIdToBytes,
+  decodeEnvelope,
+  encodeEnvelope,
+  messageAad,
+} from '../src/envelope.js';
 import { kdfChain, kdfHandshake, kdfRoot } from '../src/kdf.js';
 import { ratchetDecrypt } from '../src/ratchet.js';
 
@@ -58,19 +81,22 @@ const seeds = {
   kemEncapsulationMsg: pattern(0x50, 32),
   aliceRatchet1X25519: pattern(0x60, 32),
   bobRatchet2X25519: pattern(0x70, 32),
-};
-
-const nonces = {
-  message0: pattern(0x80, 24),
-  reply0: pattern(0x90, 24),
+  // Two nonces rather than one. Both messages are number 0 of their chain and
+  // sit under different keys, so a single value would be safe here, but a
+  // known-answer file that reuses a nonce reads like a mistake to anyone who
+  // does not stop to check the keys, and the next person to copy this shape may
+  // not have two different keys.
+  message0Nonce: pattern(0x80, 12),
+  reply0Nonce: pattern(0x90, 12),
 };
 
 // Same shape newConversationId() produces: 32 lowercase hex chars.
 const conversationId = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeaf';
+const conversationIdBytes = conversationIdToBytes(conversationId);
 
 const plaintexts = {
-  message0: 'OCX1 known answer: first message, initiator to responder',
-  reply0: 'OCX1 known answer: first reply, responder to initiator',
+  message0: 'OCX2 known answer: first message, initiator to responder',
+  reply0: 'OCX2 known answer: first reply, responder to initiator',
 };
 
 // ---------------------------------------------------------------------------
@@ -164,24 +190,42 @@ const messageKeysAliceToBob = walkChain(chainAliceToBob, 3);
 const messageKeysBobToAlice = walkChain(chainBobToAlice, 3);
 
 // ---------------------------------------------------------------------------
-// Wire messages. Mirrors ratchetEncrypt() with the nonce injected: the header
-// is bound as AAD, the body is XChaCha20-Poly1305 under message key 0.
+// Wire messages. Mirrors ratchetEncrypt(): the header plus the unsent tail of
+// the conversation id is bound as AAD, the body is ChaCha20-Poly1305 under
+// message key 0 with the nonce from `seeds`. The real seal draws that nonce
+// from the CSPRNG; see the seam paragraph at the top of this file.
+//
+// Message 0 of a chain always carries the ratchet key, so both of these are
+// step envelopes and the AAD extension is the 12 byte id tail alone. The
+// keyless case, where the 32 byte ratchet key joins the AAD without joining
+// the wire, is pinned in test/envelope-bytes.test.ts instead.
 // ---------------------------------------------------------------------------
 
-function sealMessage(messageKey, nonce, ratchetPublic, plaintext) {
+function sealMessage(messageKey, ratchetPublic, nonce, plaintext) {
   const header = {
-    conversationId,
-    ratchetPublic,
+    sessionTag: conversationIdBytes.subarray(0, 4),
     messageNumber: 0,
     previousChainLength: 0,
+    ratchetPublic,
     nonce,
   };
-  const ciphertext = xchacha20poly1305(messageKey, nonce, messageAad(header)).encrypt(utf8ToBytes(plaintext));
+  const aad = messageAad(header, conversationIdBytes, ratchetPublic);
+  const ciphertext = chacha20poly1305(messageKey, nonce, aad).encrypt(utf8ToBytes(plaintext));
   return encodeEnvelope({ kind: 'message', ...header, ciphertext });
 }
 
-const message0Token = sealMessage(messageKeysAliceToBob[0], nonces.message0, aliceRatchet1.publicKey, plaintexts.message0);
-const reply0Token = sealMessage(messageKeysBobToAlice[0], nonces.reply0, bobRatchet2.publicKey, plaintexts.reply0);
+const message0Token = sealMessage(
+  messageKeysAliceToBob[0],
+  aliceRatchet1.publicKey,
+  seeds.message0Nonce,
+  plaintexts.message0,
+);
+const reply0Token = sealMessage(
+  messageKeysBobToAlice[0],
+  bobRatchet2.publicKey,
+  seeds.reply0Nonce,
+  plaintexts.reply0,
+);
 
 // ---------------------------------------------------------------------------
 // Sanity gate: before writing anything, prove the real engine opens these
@@ -233,18 +277,19 @@ const hexAll = (record) => Object.fromEntries(Object.entries(record).map(([k, v]
 
 const vectors = {
   _note: [
-    'OCX1 known-answer vectors. Generated by scripts/gen-vectors.mjs, verified by test/vectors.test.ts.',
+    'OCX2 known-answer vectors. Generated by scripts/gen-vectors.mjs, verified by test/vectors.test.ts.',
     'All randomness is replaced by the fixed seeds below. X25519 seeds are used verbatim as secret keys.',
     'ML-KEM-768 seeds are the 64 byte FIPS 203 keygen seed (d || z); kemEncapsulationMsg is the 32 byte encapsulation message m.',
     'Handshake: dh1 = DH(bobIdentity, aliceIdentity), dh2 = DH(bobRatchet1, aliceIdentity), ikm = dh1 || dh2 || kemSharedSecret,',
-    'handshakeRootKey = HKDF-SHA256(ikm, salt "OCX1 hybrid handshake v1", info conversationId, 32 bytes).',
-    'Each DH ratchet step: HKDF-SHA256(dh, salt currentRootKey, info "OCX1 root ratchet v1", 64 bytes) -> rootKey || chainKey.',
-    'Each chain step: messageKey = HMAC-SHA256(chainKey, 0x01), nextChainKey = HMAC-SHA256(chainKey, 0x02).',
-    'Messages are XChaCha20-Poly1305 with the encoded header as AAD, see messageAad in src/envelope.ts.',
+    'handshakeRootKey = HKDF-SHA256(ikm, salt "OCX2 hybrid handshake v1", info conversationId, 32 bytes).',
+    'Each DH ratchet step: HKDF-SHA256(dh, salt currentRootKey, info "OCX2 root ratchet v1", 64 bytes) -> rootKey || chainKey.',
+    'Each chain step: one HMAC-SHA512(chainKey, 0x01) -> nextChainKey || messageKey. 0.3.x used two HMAC-SHA256 instead.',
+    'Messages are ChaCha20-Poly1305 (RFC 8439, 12 byte nonce). The nonce is random per seal and is transmitted, in the header immediately before the ciphertext.',
+    'message0Nonce and reply0Nonce in seeds are the fixed stand-ins a known-answer file needs; a real seal draws those 12 bytes from the CSPRNG.',
+    'AAD is the wire header followed by conversationId bytes 4..16 and, when the header omits it, the 32 byte sender ratchet public. See messageAad in src/envelope.ts.',
   ],
   conversationId,
   seeds: hexAll(seeds),
-  nonces: hexAll(nonces),
   plaintexts,
   derived: {
     aliceClassicalPublic: toHex(aliceClassical.publicKey),

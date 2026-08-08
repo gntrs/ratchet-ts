@@ -1033,13 +1033,24 @@ two: 122 bytes of envelope plus 4 of length prefix on top of the text. That is
 still 126 bytes of tax on a 20 byte line. 0.4.0 is where the floor gets
 attacked, because shrinking it changes the wire.
 
-The planned 0.4.0 header is 22 bytes and **is** the AAD, so `messageAad` stops
-existing rather than moving. Today the seal path builds an AAD with a `Writer`
-and then builds an envelope with a second `Writer`: at 256 B those are 1.8 us
-and 1.9 us on this laptop. The 0.4.0 shape writes those same 22 bytes once into
-the output buffer and hands the same array to the AEAD as AAD, which measures
-0.2 us. That is the double serialization gone, by construction rather than by
-tuning.
+The 0.4.0 header is 34 bytes and **is** the AAD, so `messageAad` stops existing
+rather than moving. Today the seal path builds an AAD with a `Writer` and then
+builds an envelope with a second `Writer`: at 256 B those are 1.8 us and 1.9 us
+on this laptop. The 0.4.0 shape writes those same 34 bytes once into the output
+buffer and hands the same array to the AEAD as AAD, which measures 0.2 us. That
+is the double serialization gone, by construction rather than by tuning.
+
+This paragraph said 22 bytes while 0.4.0 was being built, and the number moved
+for a reason worth recording rather than quietly correcting. A draft carried no
+nonce on the wire at all and derived it from the message number instead, which
+is what made 22 possible. That draft was built, measured at 3.4 us and 12 bytes
+cheaper, and then reverted. The reason is in the `NONCE_LEN` comment in
+`src/ratchet.ts` and it is not a performance argument: a counter nonce turns a
+restored session snapshot from an integrity failure into a confidentiality one,
+because the replayed message key meets the same nonce, produces the same
+keystream, and hands anyone holding both ciphertexts the XOR of the two
+plaintexts. A random 12 byte nonce under the same rollback is merely bad. The
+12 bytes are the price of that difference and they were paid deliberately.
 
 Both shapes were then modelled end to end in one interleaved loop, alternating
 0.3.4 and 0.4.0 every iteration on the same machine in the same process, so the

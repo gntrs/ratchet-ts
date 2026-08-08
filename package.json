@@ -1,11 +1,10 @@
 {
   "name": "ratchet-ts",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. Forward secrecy, post-compromise security, and post-quantum handshake. MIT.",
   "license": "MIT",
   "author": {
     "name": "Gintaras Zilinskas",
-    "email": "gintaraszilinskas10@gmail.com",
     "url": "https://github.com/gntrs"
   },
   "type": "module",

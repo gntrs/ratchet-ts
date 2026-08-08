@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import type { SessionState } from '../src/contract.js';
 import { concat, toHex, utf8ToBytes } from '../src/bytes.js';
-import { decodeEnvelope, encodeEnvelope, messageAad } from '../src/envelope.js';
+import { conversationIdToBytes, decodeEnvelope, encodeEnvelope, messageAad } from '../src/envelope.js';
 import { kdfChain, kdfHandshake, kdfRoot } from '../src/kdf.js';
 import { ratchetDecrypt } from '../src/ratchet.js';
 
@@ -48,8 +48,9 @@ interface Vectors {
     readonly kemEncapsulationMsg: string;
     readonly aliceRatchet1X25519: string;
     readonly bobRatchet2X25519: string;
+    readonly message0Nonce: string;
+    readonly reply0Nonce: string;
   };
-  readonly nonces: { readonly message0: string; readonly reply0: string };
   readonly plaintexts: { readonly message0: string; readonly reply0: string };
   readonly derived: {
     readonly aliceClassicalPublic: string;
@@ -213,18 +214,36 @@ test('vectors: all four wire tokens re-encode byte for byte', () => {
   });
   assert.equal(accept, vectors.tokens.accept);
 
-  // Message tokens: same construction as ratchetEncrypt with the vector nonce
-  // in place of a random one. The header doubles as the AAD, so a byte-equal
-  // token proves the AAD layout as well as the ciphertext.
-  const seal = (messageKey: Uint8Array, nonceHex: string, ratchetPublic: Uint8Array, plaintext: string): string => {
+  // Message tokens: the same construction ratchetEncrypt performs, spelled out
+  // from primitives so nothing but the KDF outputs is taken on trust.
+  //
+  // The nonce is an input again. A draft of 0.4.0 derived it from the message
+  // number, which let this file supply twelve zero bytes and pin the derivation
+  // for free; the shipped build draws twelve random bytes per seal instead, so a
+  // known-answer file has to be handed the same fixed value the generator used.
+  // That value lives in vectors.json under seeds, and reading it here rather
+  // than hard coding it keeps one copy of the number.
+  //
+  // The header doubles as the front of the AAD, and the nonce is inside the
+  // header, so a byte-equal token pins that the nonce is bound as well as sent.
+  // messageAad then appends the 12 conversation id bytes that never travel.
+  // Change the layout anywhere and the tag moves.
+  const conversationIdBytes = conversationIdToBytes(vectors.conversationId);
+  const seal = (
+    messageKey: Uint8Array,
+    ratchetPublic: Uint8Array,
+    nonce: Uint8Array,
+    plaintext: string,
+  ): string => {
     const header = {
-      conversationId: vectors.conversationId,
-      ratchetPublic,
+      sessionTag: conversationIdBytes.subarray(0, 4),
       messageNumber: 0,
       previousChainLength: 0,
-      nonce: fromHex(nonceHex),
+      ratchetPublic,
+      nonce,
     };
-    const ciphertext = xchacha20poly1305(messageKey, header.nonce, messageAad(header)).encrypt(utf8ToBytes(plaintext));
+    const aad = messageAad(header, conversationIdBytes, ratchetPublic);
+    const ciphertext = chacha20poly1305(messageKey, nonce, aad).encrypt(utf8ToBytes(plaintext));
     return encodeEnvelope({ kind: 'message', ...header, ciphertext });
   };
 
@@ -232,8 +251,21 @@ test('vectors: all four wire tokens re-encode byte for byte', () => {
   const rk0 = derived.messageKeysBobToAlice[0];
   assert.ok(mk0);
   assert.ok(rk0);
-  assert.equal(seal(mk0, vectors.nonces.message0, derived.aliceRatchet1.publicKey, vectors.plaintexts.message0), vectors.tokens.message0);
-  assert.equal(seal(rk0, vectors.nonces.reply0, derived.bobRatchet2.publicKey, vectors.plaintexts.reply0), vectors.tokens.reply0);
+  const message0Nonce = fromHex(vectors.seeds.message0Nonce);
+  const reply0Nonce = fromHex(vectors.seeds.reply0Nonce);
+  // The length is asserted, not assumed: a vectors file carrying 24 bytes here
+  // would be describing XChaCha20, which is not what this build speaks.
+  assert.equal(message0Nonce.length, 12);
+  assert.equal(reply0Nonce.length, 12);
+  assert.notDeepEqual(message0Nonce, reply0Nonce);
+  assert.equal(
+    seal(mk0, derived.aliceRatchet1.publicKey, message0Nonce, vectors.plaintexts.message0),
+    vectors.tokens.message0,
+  );
+  assert.equal(
+    seal(rk0, derived.bobRatchet2.publicKey, reply0Nonce, vectors.plaintexts.reply0),
+    vectors.tokens.reply0,
+  );
 });
 
 test('vectors: the real ratchet opens the vector tokens', () => {

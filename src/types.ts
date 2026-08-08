@@ -136,18 +136,58 @@ export interface AcceptPayload {
   readonly ratchetPublic: Uint8Array;
 }
 
+/**
+ * A sealed message on the wire.
+ *
+ * WHAT CHANGED IN 0.4.0, AND WHY THE FIELDS LOOK THIN. 0.3.x put the whole
+ * conversation id, the whole ratchet public key, both counters and a 24 byte
+ * nonce on every message, for 122 bytes of overhead. This carries a 4 byte
+ * session tag, a varint counter, a 12 byte nonce, and the ratchet key only on
+ * the first few messages of a chain, for 34 bytes in the common case.
+ *
+ * The fields that left the wire did not leave the AEAD. The full 16 byte
+ * conversation id and the full 32 byte ratchet public key are still bound as
+ * associated data, rebuilt on the receiving side from session state. Binding
+ * data that is not transmitted is exactly what associated data is for, and the
+ * alternative would have been a real loss of cross-conversation binding.
+ */
 export interface MessagePayload {
   readonly kind: 'message';
-  readonly conversationId: string;
-  /** Current ratchet public key of the sender. Drives the DH ratchet. */
-  readonly ratchetPublic: Uint8Array;
+  /**
+   * First 4 bytes of the 16 byte conversation id, raw.
+   *
+   * Enough to route an inbound frame to the right session on a host with a
+   * plausible number of conversations, and not enough to be the security
+   * binding. The receiver checks it against its own session, then binds all 16
+   * bytes into the AEAD, so a tag collision routes to the wrong session and then
+   * fails to open rather than opening as the wrong conversation.
+   */
+  readonly sessionTag: Uint8Array;
   /** Index within the current sending chain. */
   readonly messageNumber: number;
-  /** Length of the previous sending chain, so gaps can be reconstructed. */
-  readonly previousChainLength: number;
-  /** XChaCha20-Poly1305 nonce. */
+  /**
+   * Sender's current ratchet public key, present only when the sender chose to
+   * repeat it. See RATCHET_KEY_RESEND in the ratchet for how often that is and
+   * what it costs when it is not.
+   */
+  readonly ratchetPublic?: Uint8Array;
+  /**
+   * Length of the previous sending chain. Travels with the ratchet key, because
+   * it is only actionable by a receiver that is being asked to step the ratchet.
+   */
+  readonly previousChainLength?: number;
+  /**
+   * The 12 byte RFC 8439 nonce this message was sealed under, random per seal.
+   *
+   * It is on the wire because it has to be: the receiver cannot derive it, which
+   * is the entire point. A derived nonce was built and rejected, and the
+   * NONCE_LEN comment in the ratchet is where that argument lives. Last field
+   * before the ciphertext, and bound into the AEAD like every other header
+   * field, so flipping a bit of it is an authentication failure rather than a
+   * garbled decrypt.
+   */
   readonly nonce: Uint8Array;
-  /** Sealed body, including Poly1305 tag. */
+  /** Sealed body, including the 16 byte Poly1305 tag. */
   readonly ciphertext: Uint8Array;
 }
 
@@ -182,6 +222,22 @@ export type AeadBackend = 'native' | 'noble';
  */
 export interface SessionState {
   readonly conversationId: string;
+  /**
+   * The same 16 bytes as `conversationId`, unhexed, cached.
+   *
+   * `conversationId` stays the canonical hex form because it is what the
+   * handshake generates, what the invite and accept envelopes carry, and what
+   * every caller has been printing and comparing since 0.1.0. But the message
+   * path now needs the raw bytes on every seal and every open, to slice a
+   * session tag off the front and to bind all 16 into the AEAD, and parsing 32
+   * hex characters per message to get them is a cost with no reason to exist.
+   *
+   * Optional so that a session built by the handshake, which does not know about
+   * this field, is still a valid SessionState. The ratchet fills it in on the
+   * first message and every session it returns carries it, so the parse happens
+   * at most once per session rather than once per message.
+   */
+  readonly conversationIdBytes?: Uint8Array;
   readonly role: 'initiator' | 'responder';
   /** Peer identity, pinned at handshake. A change here is a MITM signal. */
   readonly peer: PublicIdentity;
@@ -192,6 +248,24 @@ export interface SessionState {
   readonly selfRatchetSecret: Uint8Array;
   /** Peer's latest ratchet public, once seen. */
   readonly peerRatchetPublic?: Uint8Array;
+  /**
+   * The peer ratchet public from the chain before the current one.
+   *
+   * Needed only because the ratchet key left the wire. A message that does not
+   * carry the key is attributed to the current receive chain, and a message that
+   * was in flight across a direction change belongs to the one before it. Its
+   * AAD binds that older key, so without this field there is nothing to rebuild
+   * the AAD from and a late message from the previous chain could not be opened
+   * at all. One chain back is the whole window; see `parkedCandidates`.
+   */
+  readonly previousPeerRatchetPublic?: Uint8Array;
+  /**
+   * Counts DH ratchet steps taken on the receive side. Purely local, never on
+   * the wire, and its only job is to key `skippedKeys` with a small integer
+   * instead of a base64 encoding of a 32 byte public key. Optional so a session
+   * built by the handshake, which has taken no steps, is still valid.
+   */
+  readonly peerChainEpoch?: number;
   /** Sending chain. Undefined until the first DH step completes. */
   readonly sendChainKey?: Uint8Array;
   readonly sendCount: number;
@@ -202,7 +276,12 @@ export interface SessionState {
   readonly previousSendCount: number;
   /**
    * Message keys for messages that arrived out of order, or not yet at all.
-   * Keyed `${base64(ratchetPublic)}:${messageNumber}`.
+   * Keyed `${peerChainEpoch}:${messageNumber}`.
+   *
+   * The key used to be `${base64(ratchetPublic)}:${messageNumber}`, which meant
+   * base64 encoding 32 bytes on every open just to probe a map that is empty in
+   * the common case. The epoch is a small integer that identifies the same chain
+   * for the same purpose, and it is local state, so nothing on the wire moved.
    *
    * Bounded, and must stay bounded: an attacker who can make us skip forever
    * would otherwise have a memory exhaustion primitive. See MAX_SKIP in the
