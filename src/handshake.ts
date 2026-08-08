@@ -1,9 +1,9 @@
-import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 
 import type { AcceptPayload, EnvelopeToken, IdentityKeyPair, InvitePayload, PendingSession, SessionState } from './contract.js';
 import { concat, toHex, wipe } from './bytes.js';
+import { x25519Keygen, x25519SharedSecret } from './curves.js';
 import { encodeEnvelope } from './envelope.js';
 import { fail } from './errors.js';
 import {
@@ -68,14 +68,14 @@ export function acceptInvite(self: IdentityKeyPair, invite: InvitePayload): { to
   requireLength(invite.sender.classicalPublic, X25519_PUBLIC_LEN, 'invite classical public key');
   requireLength(invite.sender.pqPublic, MLKEM768_PUBLIC_LEN, 'invite ML-KEM public key');
 
-  const ratchet = x25519.keygen();
+  const ratchet = x25519Keygen();
   const kem = ml_kem768.encapsulate(invite.sender.pqPublic);
 
   // DH1 binds the responder's identity, DH2 binds the responder's fresh ratchet
   // key. Without DH2 the whole handshake would be replayable by anyone holding
   // a recorded invite.
-  const dh1 = x25519.getSharedSecret(self.classicalSecret, invite.sender.classicalPublic);
-  const dh2 = x25519.getSharedSecret(ratchet.secretKey, invite.sender.classicalPublic);
+  const dh1 = x25519SharedSecret(self.classicalSecret, invite.sender.classicalPublic);
+  const dh2 = x25519SharedSecret(ratchet.secretKey, invite.sender.classicalPublic);
   const ikm = concat(dh1, dh2, kem.sharedSecret);
   const rootKey = kdfHandshake(ikm, invite.conversationId);
   wipe(dh1, dh2, ikm, kem.sharedSecret);
@@ -118,8 +118,8 @@ export function completeInvite(self: IdentityKeyPair, pending: PendingSession, a
   requireLength(accept.ratchetPublic, X25519_PUBLIC_LEN, 'accept ratchet public key');
   requireLength(accept.kemCiphertext, MLKEM768_CIPHERTEXT_LEN, 'accept ML-KEM ciphertext');
 
-  const dh1 = x25519.getSharedSecret(self.classicalSecret, accept.sender.classicalPublic);
-  const dh2 = x25519.getSharedSecret(self.classicalSecret, accept.ratchetPublic);
+  const dh1 = x25519SharedSecret(self.classicalSecret, accept.sender.classicalPublic);
+  const dh2 = x25519SharedSecret(self.classicalSecret, accept.ratchetPublic);
   // ML-KEM decapsulation is implicitly rejecting: a corrupted ciphertext yields
   // a wrong-but-well-formed secret rather than an error, so the mismatch only
   // surfaces when the first message fails its AEAD tag. That is by design.
@@ -128,8 +128,8 @@ export function completeInvite(self: IdentityKeyPair, pending: PendingSession, a
   const handshakeRoot = kdfHandshake(ikm, accept.conversationId);
   wipe(dh1, dh2, pq, ikm);
 
-  const ratchet = x25519.keygen();
-  const dh = x25519.getSharedSecret(ratchet.secretKey, accept.ratchetPublic);
+  const ratchet = x25519Keygen();
+  const dh = x25519SharedSecret(ratchet.secretKey, accept.ratchetPublic);
   const stepped = kdfRoot(handshakeRoot, dh);
   wipe(dh, handshakeRoot);
 

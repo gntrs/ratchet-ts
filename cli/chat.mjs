@@ -60,8 +60,9 @@
 
 import readline from 'node:readline';
 
-import { decodeEnvelope, engine, fingerprint, formatFingerprint, isCryptoFailure, publicOf } from '../dist/index.js';
+import { decodeEnvelope, engine, fingerprint, formatFingerprint } from '../dist/index.js';
 import { color } from './format.mjs';
+import { explainError, pairWords } from './protocol.mjs';
 
 /** Bumped only on a breaking frame change, so a mismatch is a clean refusal. */
 const PROTOCOL_VERSION = 1;
@@ -122,15 +123,13 @@ async function expectFrame(channel, what) {
 }
 
 /**
- * A raw reason code is useless to someone staring at a terminal, but the full
- * translation table lives in cli/protocol.mjs and is not exported. Rather than
- * fork a second copy that can drift out of step, surface the library's own
- * sentence and the machine reason next to it. Exporting wrapCrypto from
- * cli/protocol.mjs would let this function be deleted outright.
+ * One translation table for the whole CLI, in cli/protocol.mjs, read here in
+ * its chat wording. This used to be a weaker local fallback that printed the
+ * library's own terse message, so `ratchet send` explained what a
+ * `replay_detected` meant and `ratchet chat` printed the bare code.
  */
 function explain(err, during) {
-  if (isCryptoFailure(err)) return `${during}: ${err.message} (${err.reason})`;
-  return `${during}: ${err && err.message ? err.message : String(err)}`;
+  return explainError(err, during, 'chat');
 }
 
 function parseControl(text, what) {
@@ -146,52 +145,24 @@ function parseControl(text, what) {
   return body;
 }
 
-function compareBytes(a, b) {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i += 1) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
-}
-
 /**
- * Six words that are IDENTICAL on both ends, for reading aloud over the phone.
- *
- * Copied from cli/protocol.mjs, which does not export it. The two copies MUST
- * stay byte identical or a user comparing a chat against a transfer sees two
- * different sets of words for one pair of identities and concludes, wrongly,
- * that something is wrong. Exporting it from cli/protocol.mjs would remove the
- * duplication and the risk with it.
- *
- * peerWords alone cannot do this job: a fingerprint of the peer identity is
- * different on each side by construction. Hashing both identities in a
- * canonical order gives one string, computed the same way on both machines,
- * that either party can simply read out. Sorting by the X25519 public key is
- * what makes it order independent, since neither side agrees on who is "first".
- */
-function pairWords(self, peer) {
-  const mine = publicOf(self);
-  const [first, second] = compareBytes(mine.classicalPublic, peer.classicalPublic) <= 0
-    ? [mine, peer]
-    : [peer, mine];
-  return formatFingerprint(
-    fingerprint({
-      classicalPublic: Buffer.concat([first.classicalPublic, second.classicalPublic]),
-      pqPublic: Buffer.concat([first.pqPublic, second.pqPublic]),
-    }),
-  );
-}
-
-/**
- * Fired the instant the handshake settles, carrying the two word strings, so
- * bin/ can print the safety words at the top exactly the way send and recv do.
+ * Fired the instant the handshake settles, carrying the two word strings and
+ * the peer identity hex, so bin/ can print the safety words at the top exactly
+ * the way send and recv do and classify the peer against the same trust store.
  * A thrown or rejected callback is swallowed: a broken banner must never take
  * down a live conversation.
+ *
+ * pairWords is imported from cli/protocol.mjs rather than copied. This file used
+ * to carry its own copy with a comment asking whoever edited either one to edit
+ * both, which is a rule with no enforcement: the day the two drifted, a user
+ * comparing a chat against a file transfer would have seen two different word
+ * sets for one pair of identities and concluded, wrongly, that something was
+ * wrong.
  */
-function announce(onHandshake, peerWords, sessionWords, handshakeMs) {
+function announce(onHandshake, peerWords, sessionWords, handshakeMs, peerHex) {
   if (typeof onHandshake !== 'function') return;
   try {
-    void onHandshake({ peerWords, sessionWords, handshakeMs });
+    void onHandshake({ peerWords, sessionWords, handshakeMs, peerHex });
   } catch {
     /* a broken banner must never fail a chat */
   }
@@ -344,7 +315,7 @@ function makeTerminal({ input, output }) {
  * Ctrl+C. Resolves rather than throws on all three: a peer hanging up is the
  * normal end of a conversation, not an error.
  */
-export async function runChat({ channel, identity, stdin, stdout, onHandshake }) {
+export async function runChat({ channel, identity, stdin, stdout, onHandshake, onVerify }) {
   const input = stdin ?? process.stdin;
   const output = stdout ?? process.stdout;
 
@@ -435,9 +406,10 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake })
   }
 
   const handshakeMs = performance.now() - handshakeStart;
-  const peerWords = formatFingerprint(fingerprint(session.peer));
+  const peerPrint = fingerprint(session.peer);
+  const peerWords = formatFingerprint(peerPrint);
   const sessionWords = pairWords(identity, session.peer);
-  announce(onHandshake, peerWords, sessionWords, handshakeMs);
+  announce(onHandshake, peerWords, sessionWords, handshakeMs, peerPrint.hex);
 
   // ------------------------------------------------------------------
   // Session lock
@@ -523,6 +495,49 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake })
     }
   }
 
+  // ------------------------------------------------------------------
+  // /verify
+  // ------------------------------------------------------------------
+  //
+  // THE SEAM. This is the minimum that works in today's readline chat, and the
+  // TUI redesign is expected to replace the prompting around it. What must not
+  // be replaced is the rule inside it: marking a peer verified asks a real
+  // question and accepts only a real answer, the whole word `yes` typed on its
+  // own line. There is no single keystroke anywhere in here that confirms
+  // anything, Enter on an empty line cancels rather than confirms, and nothing
+  // defaults to yes. A verification is a human saying they compared six words
+  // out loud with another human, so it can only ever come from a human.
+  //
+  // runChat itself knows nothing about where a verification is stored. bin/
+  // passes onVerify and owns the trust store, which keeps this file free of any
+  // opinion about disk, exactly as it is free of one about the network.
+  let awaitingVerify = null;
+
+  function startVerify(label) {
+    if (typeof onVerify !== 'function') {
+      note('this build has nowhere to record a verification, so /verify does nothing here.');
+      return;
+    }
+    awaitingVerify = { label: label || null };
+    note('Read the six safety words aloud with the other person, on a call or in the same room.');
+    note('If they read back the SAME six words, type  yes  and press enter. Anything else cancels.');
+  }
+
+  function finishVerify(answer) {
+    const pending = awaitingVerify;
+    awaitingVerify = null;
+    if (answer !== 'yes') {
+      note('not verified. nothing was recorded.');
+      return;
+    }
+    note('verified. writing it to the peer store.');
+    void Promise.resolve(onVerify({ label: pending.label }))
+      .then((line) => {
+        if (line) note(line);
+      })
+      .catch((err) => note(explain(err, 'recording that verification failed')));
+  }
+
   /** Best effort. A peer that has already gone will not care that this failed. */
   async function sayGoodbye() {
     try {
@@ -536,6 +551,13 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake })
     if (ended) return;
     term.consumeEcho(raw);
     const text = raw.trim();
+    // Before the empty-line branch on purpose, so pressing enter on nothing
+    // while a confirmation is open cancels it instead of falling through and
+    // leaving it open for whatever gets typed next.
+    if (awaitingVerify) {
+      finishVerify(text);
+      return;
+    }
     if (text.length === 0) {
       // Nothing to send, but the prompt still has to come back or the screen
       // is left with no input line at all.
@@ -545,6 +567,12 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake })
     if (text === '/quit' || text.startsWith('/quit ')) {
       if (term.interactive) term.drawInput();
       void sayGoodbye().then(() => finish('quit'));
+      return;
+    }
+    if (text === '/verify' || text.startsWith('/verify ')) {
+      // Everything after the command is the label, spaces and all, so a name
+      // with a space in it needs no quoting from someone mid conversation.
+      startVerify(text.slice('/verify'.length).trim());
       return;
     }
     // No drawInput after this one: logLine goes through print(), which already
@@ -630,7 +658,11 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake })
     // Prompt first, hint second. note() erases and redraws the input line, so
     // drawing the prompt after it would print a second one.
     term.start();
-    note('connected. type a message and press enter, /quit or Ctrl+C to leave.');
+    note(
+      typeof onVerify === 'function'
+        ? 'connected. type a message and press enter. /verify NAME to confirm the words, /quit or Ctrl+C to leave.'
+        : 'connected. type a message and press enter, /quit or Ctrl+C to leave.',
+    );
 
     void readLoop();
     await finished;

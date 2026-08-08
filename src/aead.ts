@@ -359,6 +359,18 @@ function nativeOpen(
     // final() is where Poly1305 renders its verdict. It throws on a bad tag,
     // and the plaintext from update() must be discarded when it does.
     const tail = decipher.final();
+    // ChaCha20 is a stream cipher with no trailing block, so for this algorithm
+    // final() is always empty and `concat` would copy the whole plaintext for
+    // nothing. On a 10 MB transfer that copy cost more than a tenth of the
+    // total open time. It is a guard rather than an assumption: a backend that
+    // does hand back trailing bytes still gets the concat, and the probe in
+    // `probe()` exercises the empty case on the machine that will run it.
+    //
+    // Rewrapped rather than returned as is, because node hands back a Buffer
+    // and every other path in this package returns a plain Uint8Array. The
+    // wrap is a view over the same memory, so it costs nothing and it stops the
+    // return prototype depending on which backend answered.
+    if (tail.length === 0) return new Uint8Array(head.buffer, head.byteOffset, head.length);
     return concat(head, tail);
   } catch {
     return null;

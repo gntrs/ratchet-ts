@@ -5,14 +5,42 @@
 //   npm run bench:wire -- --runs 5     5 runs
 //
 // This is the sibling of bench/bench.mjs. That script times primitives; this one
-// times the things a 0.3.0 release note would claim: how many bytes leave the
-// machine per byte of payload, how fast each AEAD backend actually is, and how
-// much of a handshake is this library versus the network between the two peers.
+// times the things a release note would claim: how many bytes leave the machine
+// per byte of payload, how fast each AEAD backend actually is, and how much of a
+// handshake is this library versus the network between the two peers.
 //
 // Read bench/README.md before quoting any number out of here. The short version:
 // only the crypto columns say anything about this library. Every throughput
 // number is a property of the transport it was measured on, and the transport
 // here is a loopback socket with an extra hop in it.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS FILE CALLS cli/protocol.mjs INSTEAD OF COPYING IT
+// ---------------------------------------------------------------------------
+//
+// Until 0.3.2 this script reimplemented the CLI's frame sequence so it would
+// keep running while that file was mid refactor. It admitted as much in a
+// comment and then did exactly what the comment warned about: cli/protocol.mjs
+// moved its payload path onto engine.sealToEnvelopeBytes and
+// engine.openFromEnvelopeBytes in 0.3.1, the copy here stayed on
+// engine.sealBytes and engine.openBytes, and for two releases this benchmark
+// measured base64url work that the shipping code no longer performs. On a
+// 10.5 MB transfer the copy spent hundreds of milliseconds turning a 65535 byte
+// ciphertext into an 87532 character token and parsing it straight back out,
+// per frame, at both ends. The reported throughput was roughly a tenth of the
+// real one. The tell was sitting in plain sight: the copy declared protocol
+// version 1 while cli/protocol.mjs had been on version 2 since the binary frame
+// format landed.
+//
+// So the copy is gone. Sections 1 and 4 now call sendPayload and receivePayload
+// from cli/protocol.mjs over a real socket pair. Those two functions take a
+// channel and return a stats object; they touch no globals, no stdout and no
+// process state, so there was never a reason they could not be driven from
+// here. Every constant that used to be restated is now imported. This class of
+// drift cannot recur, because there is no second copy left to drift from.
+//
+// One reimplementation survives, in section 3, and it is guarded rather than
+// trusted. See the comment above oneHandshake for what it is and what checks it.
 import os from 'node:os';
 import net from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
@@ -21,6 +49,12 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import { connect, listen } from '../cli/frame.mjs';
 import { humanBytes } from '../cli/format.mjs';
+import {
+  DEFAULT_CHUNK_BYTES,
+  PROTOCOL_VERSION,
+  receivePayload,
+  sendPayload,
+} from '../cli/protocol.mjs';
 import * as lib from '../dist/index.js';
 
 const engine = lib.engine;
@@ -74,16 +108,14 @@ const RUNS = (() => {
   return Number.isFinite(n) && n >= 1 && n <= 50 ? n : 3;
 })();
 
-// The chunk size a real transfer gets, restated rather than imported.
+// The chunk size a real transfer gets, imported rather than restated.
 //
-// cli/protocol.mjs computes min(64 KiB, 0xffff - 16) and exports it as
-// DEFAULT_CHUNK_BYTES, and importing it from there would be the tidier thing.
-// It is copied instead because that module also imports names from dist that
-// may not exist while the release is being assembled, and a benchmark that
-// cannot start because an unrelated file is half converted is useless. If the
-// envelope ever gets a u32 length prefix, this number moves and so does the
-// one in cli/protocol.mjs, and nothing here will notice: check both.
-const CHUNK = Math.min(64 * 1024, 0xffff - 16);
+// It used to be recomputed here as min(64 KiB, 0xffff - 16), with a comment
+// explaining that copying it was safer than importing it. That reasoning is
+// dead: this file now imports sendPayload from the same module, so if
+// cli/protocol.mjs cannot load then the benchmark cannot run either way, and
+// the copy bought nothing except a second place for the number to be wrong.
+const CHUNK = DEFAULT_CHUNK_BYTES;
 
 // Two decades of payload size, because envelope overhead is a fixed cost per
 // chunk and a percentage only looks meaningful at one end of that range.
@@ -94,32 +126,41 @@ const SIZES = [20, 1024, 64 * 1024, 1024 * 1024, 10 * 1024 * 1024];
 const BASELINE_SIZE = BASELINE_0_2_1.plainBytes;
 const BASELINE_NAME = 'screenshot.png';
 
-// Protocol version byte from cli/protocol.mjs. Restated rather than imported
-// because it is a private constant there, and the header JSON below has to be
-// byte identical to the one a real transfer sends or the wire totals are wrong.
-const PROTOCOL_VERSION = 1;
-
 const HOST = '127.0.0.1';
 
 // The base64url token form pads three bytes into four characters and every
-// frame used to carry one trailing newline. That is the wire this release is
-// replacing, and it is reconstructed rather than measured, so it is exact
-// arithmetic on a real envelope rather than a guess.
+// frame used to carry one trailing newline. That is the wire 0.3.0 replaced,
+// and it is reconstructed rather than measured, so it is exact arithmetic on
+// real envelopes rather than a guess.
 const TOKEN_FRAME_OVERHEAD = 1;
 
-// Header of the self describing binary envelope: one version byte, one kind
-// tag. Only used when dist does not export encodeEnvelopeBytes, in which case
-// the binary column is derived from the base64 length instead of measured, and
-// says so.
-const BINARY_ENVELOPE_HEADER = 2;
-const BINARY_FRAME_PREFIX = 4;
+/** u32 big endian length prefix per frame, set by cli/frame.mjs. */
+const FRAME_PREFIX_BYTES = 4;
 
 // ---------------------------------------------------------------------------
-// What this build actually gives us
+// What this build has to give us
 // ---------------------------------------------------------------------------
+//
+// There used to be a fallback here: when dist did not export encodeEnvelopeBytes
+// the script put base64url tokens on the wire and derived the binary column
+// arithmetically. That branch is unreachable now. cli/protocol.mjs imports
+// encodeEnvelopeBytes at module load, so a dist without it fails this file's
+// import before any of this runs. Rather than keep a dead branch that claims to
+// handle a case it cannot reach, the requirements are asserted once, loudly.
 
-const HAS_ENVELOPE_BYTES =
-  typeof lib.encodeEnvelopeBytes === 'function' && typeof lib.decodeEnvelopeBytes === 'function';
+const REQUIRED_MODULE = ['encodeEnvelope', 'decodeEnvelope', 'encodeEnvelopeBytes', 'decodeEnvelopeBytes'];
+const REQUIRED_ENGINE = ['createIdentity', 'invite', 'seal', 'sealBytes', 'open', 'sealToEnvelopeBytes', 'openFromEnvelopeBytes'];
+
+for (const name of REQUIRED_MODULE) {
+  if (typeof lib[name] !== 'function') {
+    throw new Error(`dist does not export ${name}, which this benchmark and cli/protocol.mjs both need`);
+  }
+}
+for (const name of REQUIRED_ENGINE) {
+  if (typeof engine[name] !== 'function') {
+    throw new Error(`dist exports no engine.${name}, which this benchmark and cli/protocol.mjs both need`);
+  }
+}
 
 const HAS_LIB_AEAD =
   typeof lib.sealAead === 'function' &&
@@ -128,17 +169,10 @@ const HAS_LIB_AEAD =
 
 const LIB_AEAD_BACKEND = HAS_LIB_AEAD ? lib.aeadBackend() : null;
 
-const WIRE_MODE = HAS_ENVELOPE_BYTES ? 'binary' : 'token';
-
 const notes = [];
-if (!HAS_ENVELOPE_BYTES) {
-  notes.push(
-    'dist does not export encodeEnvelopeBytes, so frames carry the base64url token and the binary column is arithmetic, not measurement. Re-export it from src/index.ts and rebuild to fix this.',
-  );
-}
 if (!HAS_LIB_AEAD) {
   notes.push(
-    'dist does not export sealAead/openAead/aeadBackend, so only the @noble/ciphers column in section 2 is real.',
+    'dist does not export sealAead/openAead, so only the @noble/ciphers column in section 2 is real.',
   );
 }
 
@@ -147,7 +181,6 @@ if (!HAS_LIB_AEAD) {
 // ---------------------------------------------------------------------------
 
 const enc = new TextEncoder();
-const dec = new TextDecoder();
 
 const pct = (n) => `${n.toFixed(1)}%`;
 const ms = (n) => n.toFixed(2);
@@ -192,66 +225,31 @@ async function charge(clock, fn) {
   }
 }
 
-/** Base64url without padding: three payload bytes become four characters. */
-function base64urlLength(byteLength) {
-  return Math.ceil((byteLength * 4) / 3);
+/** The two conversions cli/protocol.mjs calls toWire and fromWire. */
+function toWire(token) {
+  return lib.encodeEnvelopeBytes(lib.decodeEnvelope(token));
 }
 
-/** Inverse of the above, for recovering a body length from a token. */
-function bodyLengthFromBase64url(chars) {
-  return Math.floor((chars * 3) / 4);
-}
-
-// ---------------------------------------------------------------------------
-// Frame transcoding
-// ---------------------------------------------------------------------------
-//
-// engine.seal returns a token string and engine.open takes one, so putting the
-// binary envelope on the wire means transcoding at both ends. A binary native
-// implementation would not pay that, so it is charged to its own clock and
-// printed in its own column instead of being folded into the crypto number.
-// Do not read the transcode column as a cost of this release; read it as the
-// cost of this harness not having a bytes-in bytes-out seal API to call.
-
-function frameFromToken(token, clock) {
-  if (WIRE_MODE === 'binary') {
-    const t0 = performance.now();
-    const bytes = lib.encodeEnvelopeBytes(lib.decodeEnvelope(token));
-    clock.ms += performance.now() - t0;
-    return bytes;
-  }
-  return enc.encode(token);
-}
-
-function tokenFromFrame(frame, clock) {
-  if (WIRE_MODE === 'binary') {
-    const t0 = performance.now();
-    const token = lib.encodeEnvelope(lib.decodeEnvelopeBytes(frame));
-    clock.ms += performance.now() - t0;
-    return token;
-  }
-  return dec.decode(frame);
+function fromWire(frame) {
+  return lib.encodeEnvelope(lib.decodeEnvelopeBytes(frame));
 }
 
 /**
- * What one envelope costs on each of the two wires, from the same token.
+ * What the frames a transfer actually sent would have cost as 0.2.1 tokens.
  *
- * The token number is always exact. The binary number is exact when dist
- * exports encodeEnvelopeBytes and is otherwise reconstructed from the base64
- * length, which is correct arithmetic over a documented two byte header but is
- * not a measurement, and the printed output says so.
+ * Exact, not derived: each frame is decoded and re-encoded as the OCX1 token it
+ * would have been, and the token's real byte length is added up. Every call
+ * happens after the transfer has finished and no timer is running, so this
+ * cannot leak into any measured number. It is the one place in this file that
+ * still builds a token from a chunk, and it does it deliberately, to price a
+ * wire format nothing here speaks any more.
  */
-function sizeBothWays(token) {
-  const tokenBytes = Buffer.byteLength(token, 'utf8');
-  if (HAS_ENVELOPE_BYTES) {
-    return { tokenBytes, envelopeBytes: lib.encodeEnvelopeBytes(lib.decodeEnvelope(token)).length };
+function tokenWireCost(frames) {
+  let total = 0;
+  for (const frame of frames) {
+    total += Buffer.byteLength(fromWire(frame), 'utf8') + TOKEN_FRAME_OVERHEAD;
   }
-  // OCX1.<kind>.<base64url>: everything before the last dot is ASCII overhead.
-  const bodyChars = token.length - (token.lastIndexOf('.') + 1);
-  return {
-    tokenBytes,
-    envelopeBytes: bodyLengthFromBase64url(bodyChars) + BINARY_ENVELOPE_HEADER,
-  };
+  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,19 +336,32 @@ async function loopbackPair({ counted = true } = {}) {
   };
 }
 
-/** A frame adapter, so the same code works whether frames are bytes or a token. */
-function wireFor(channel, transcodeClock) {
+/**
+ * A channel that keeps a reference to every frame it was asked to send.
+ *
+ * cli/protocol.mjs returns one wireBytes total and nothing per frame, but the
+ * 0.2.1 comparison table needs the individual envelopes, and the frame sequence
+ * check needs their kinds and their order. Recording them at the channel is the
+ * only place both are available without reaching inside the module.
+ *
+ * The recorded array is the real thing the socket carried, not a copy made by
+ * this file, so nothing here can disagree with what was sent. The only work
+ * added to the send path is one array push, which is nanoseconds against a
+ * socket write, and everything derived from the recording happens after the
+ * transfer has completed and every clock has stopped.
+ */
+function recordingChannel(channel) {
+  const sent = [];
   return {
-    async send(token) {
-      await channel.send(frameFromToken(token, transcodeClock));
+    remote: channel.remote,
+    sent,
+    async send(bytes) {
+      sent.push(bytes);
+      return channel.send(bytes);
     },
-    async recv(what) {
-      const frame = await channel.receive();
-      if (frame === null || frame === undefined) {
-        throw new Error(`the channel closed while waiting for ${what}`);
-      }
-      return tokenFromFrame(frame, transcodeClock);
-    },
+    receive: () => channel.receive(),
+    next: () => channel.receive(),
+    close: () => channel.close(),
   };
 }
 
@@ -358,192 +369,169 @@ function wireFor(channel, transcodeClock) {
 // Section 1: one real transfer, measured
 // ---------------------------------------------------------------------------
 //
-// This reimplements the cli/protocol.mjs frame sequence rather than calling it,
-// so the bench keeps working while that file is mid refactor. The accounting is
-// deliberately identical: "on the wire" is the sealed header plus the sealed
-// chunks, sender to receiver. Handshake frames are counted separately and
-// reported in section 3, exactly as --stats does it.
+// Not a reimplementation. sendPayload and receivePayload from cli/protocol.mjs
+// run against the two ends of a loopback pair with the counting relay between
+// them, and every number below is either returned by those two functions or
+// counted by the relay.
 //
-// The consequence, stated plainly: a divergence introduced in cli/protocol.mjs
-// will not show up in these numbers.
-
-function headerJson({ name, size, sha256, chunks }) {
-  return JSON.stringify({
-    v: PROTOCOL_VERSION,
-    name,
-    size,
-    sha256,
-    chunks,
-    chunkSize: CHUNK,
-  });
-}
+// The accounting therefore is the CLI's accounting rather than a copy of it:
+// "on the wire" is the sealed header plus the sealed chunks, sender to
+// receiver, and the handshake frames are counted separately and reported in
+// section 3. That is what --stats prints because it is literally the same code.
 
 function chunkCount(size) {
   return size === 0 ? 0 : Math.ceil(size / CHUNK);
 }
 
-async function benchSender({ wire, identity, name, bytes, clock, relay }) {
-  const size = bytes.length;
-  const chunks = chunkCount(size);
+/**
+ * The frame sequence a healthy transfer produces, checked rather than assumed.
+ *
+ * This is what replaced the old "the bench copies the CLI and a divergence will
+ * not show up here" comment. If cli/protocol.mjs ever sends a different number
+ * of frames, or sends something that is not a self describing binary envelope,
+ * the benchmark stops instead of quietly reporting the wrong thing.
+ *
+ * The check that would have caught the 0.3.1 drift is the round trip one: a
+ * frame carrying a base64url token cannot survive decodeEnvelopeBytes followed
+ * by encodeEnvelopeBytes unchanged, because it is not an envelope, it is a
+ * string describing one.
+ */
+function checkFrameSequence({ senderFrames, receiverFrames, chunks }) {
+  const problems = [];
 
-  const handshakeStart = performance.now();
-
-  const invite = await wire.recv('the peer invite');
-  let opened = await charge(clock, () => engine.open(identity, invite, {}));
-  if (opened.outcome !== 'invite') throw new Error(`expected an invite, got ${opened.outcome}`);
-  let session = opened.session;
-  await wire.send(opened.reply);
-
-  // The responder has no send chain until the initiator speaks, so the receiver
-  // has to say something before this side can send at all. See cli/protocol.mjs
-  // step 3b: the handshake is not finished until this frame lands.
-  const ready = await wire.recv('the receiver ready frame');
-  const readyOpen = await charge(clock, () => engine.open(identity, ready, { session }));
-  if (readyOpen.outcome !== 'message') throw new Error('expected a ready frame');
-  session = readyOpen.session;
-
-  const handshakeMs = performance.now() - handshakeStart;
-  // Every handshake byte has necessarily crossed the relay by now: the receiver
-  // could not have produced this frame without consuming our reply first.
-  const afterHandshake = relay ? relay.snapshot() : null;
-
-  const sha256 = sha256Hex(bytes);
-  const header = headerJson({ name, size, sha256, chunks });
-
-  // What the same envelopes would have cost on the 0.2.1 base64 wire, and on
-  // the binary wire, computed frame by frame from the tokens we are sending.
-  let tokenWire = 0;
-  let binaryWire = 0;
-
-  const wallStart = performance.now();
-
-  const sealedHeader = await charge(clock, () => engine.seal(session, header));
-  session = sealedHeader.session;
-  {
-    const both = sizeBothWays(sealedHeader.token);
-    tokenWire += both.tokenBytes + TOKEN_FRAME_OVERHEAD;
-    binaryWire += both.envelopeBytes + BINARY_FRAME_PREFIX;
+  const wantSender = 2 + chunks; // accept, header, one per chunk
+  const wantReceiver = 3; // invite, ready, acknowledgement
+  if (senderFrames.length !== wantSender) {
+    problems.push(`the sender put ${senderFrames.length} frames on the socket, expected ${wantSender}`);
   }
-  await wire.send(sealedHeader.token);
-
-  for (let i = 0; i < chunks; i += 1) {
-    const start = i * CHUNK;
-    const slice = bytes.subarray(start, Math.min(start + CHUNK, size));
-    const sealed = await charge(clock, () => engine.sealBytes(session, slice));
-    session = sealed.session;
-    const both = sizeBothWays(sealed.token);
-    tokenWire += both.tokenBytes + TOKEN_FRAME_OVERHEAD;
-    binaryWire += both.envelopeBytes + BINARY_FRAME_PREFIX;
-    await wire.send(sealed.token);
+  if (receiverFrames.length !== wantReceiver) {
+    problems.push(`the receiver put ${receiverFrames.length} frames on the socket, expected ${wantReceiver}`);
   }
 
-  const ackFrame = await wire.recv('the receiver acknowledgement');
-  const ack = await charge(clock, () => engine.open(identity, ackFrame, { session }));
-  if (ack.outcome !== 'message') throw new Error('expected an acknowledgement');
-  const wallMs = performance.now() - wallStart;
-  const afterPayload = relay ? relay.snapshot() : null;
-
-  const ackBody = JSON.parse(ack.plaintext);
-  if (ackBody.ok !== true || ackBody.sha256 !== sha256) {
-    throw new Error('the receiver did not verify the payload');
-  }
-
-  return {
-    plainBytes: size,
-    chunks,
-    handshakeMs,
-    wallMs,
-    sha256,
-    tokenWire,
-    binaryWire,
-    handshakeWireUp: afterHandshake ? afterHandshake.up : NaN,
-    handshakeWireDown: afterHandshake ? afterHandshake.down : NaN,
-    // The measured answer: bytes the kernel carried from sender to receiver
-    // between the end of the handshake and the acknowledgement.
-    measuredWire: afterHandshake && afterPayload ? afterPayload.up - afterHandshake.up : NaN,
+  const kindOf = (frame) => {
+    try {
+      return lib.decodeEnvelopeBytes(frame).kind;
+    } catch {
+      return null;
+    }
   };
-}
 
-async function benchReceiver({ wire, identity, clock }) {
-  const invited = await charge(clock, () => engine.invite(identity));
-  await wire.send(invited.token);
-
-  const replyFrame = await wire.recv('the sender reply');
-  const accepted = await charge(clock, () =>
-    engine.open(identity, replyFrame, { pending: invited.pending }),
-  );
-  if (accepted.outcome !== 'accepted') throw new Error(`expected an accept, got ${accepted.outcome}`);
-  let session = accepted.session;
-
-  const ready = await charge(clock, () =>
-    engine.seal(session, JSON.stringify({ v: PROTOCOL_VERSION, ready: true })),
-  );
-  session = ready.session;
-  await wire.send(ready.token);
-
-  const headerFrame = await wire.recv('the payload header');
-  const headerOpen = await charge(clock, () => engine.open(identity, headerFrame, { session }));
-  if (headerOpen.outcome !== 'message') throw new Error('expected a payload header');
-  session = headerOpen.session;
-  const header = JSON.parse(headerOpen.plaintext);
-
-  const assembled = new Uint8Array(header.size);
-  let done = 0;
-  for (let i = 0; i < header.chunks; i += 1) {
-    const frame = await wire.recv(`chunk ${i + 1}`);
-    const chunk = await charge(clock, () => engine.openBytes(session, frame));
-    session = chunk.session;
-    assembled.set(chunk.plaintext, done);
-    done += chunk.plaintext.length;
+  const senderKinds = senderFrames.map(kindOf);
+  const receiverKinds = receiverFrames.map(kindOf);
+  if (senderKinds[0] !== 'accept') problems.push(`the sender's first frame is ${senderKinds[0]}, expected accept`);
+  if (receiverKinds[0] !== 'invite') problems.push(`the receiver's first frame is ${receiverKinds[0]}, expected invite`);
+  for (let i = 1; i < senderKinds.length; i += 1) {
+    if (senderKinds[i] !== 'message') {
+      problems.push(`sender frame ${i + 1} is ${senderKinds[i]}, expected message`);
+      break;
+    }
   }
-  if (done !== header.size) throw new Error(`assembled ${done} of ${header.size} bytes`);
+  for (let i = 1; i < receiverKinds.length; i += 1) {
+    if (receiverKinds[i] !== 'message') {
+      problems.push(`receiver frame ${i + 1} is ${receiverKinds[i]}, expected message`);
+      break;
+    }
+  }
 
-  // Belt and braces over the AEAD, same reasoning as the CLI: each chunk
-  // authenticates only itself, so only a whole payload hash catches an
-  // assembly fault. A bench that silently moved the wrong bytes would be worse
-  // than no bench.
-  const sha256 = sha256Hex(assembled);
-  if (sha256 !== header.sha256) throw new Error('payload hash mismatch after assembly');
+  // Every frame has to be an envelope in binary form. A token would fail here.
+  let roundTripped = 0;
+  for (const frame of [...senderFrames, ...receiverFrames]) {
+    let same = false;
+    try {
+      const again = lib.encodeEnvelopeBytes(lib.decodeEnvelopeBytes(frame));
+      same = Buffer.compare(Buffer.from(again), Buffer.from(frame)) === 0;
+    } catch {
+      same = false;
+    }
+    if (same) roundTripped += 1;
+  }
+  const total = senderFrames.length + receiverFrames.length;
+  if (roundTripped !== total) {
+    problems.push(`${total - roundTripped} of ${total} frames are not self describing binary envelopes`);
+  }
 
-  const ack = await charge(clock, () => engine.seal(session, JSON.stringify({ ok: true, sha256 })));
-  await wire.send(ack.token);
-
-  return { plainBytes: header.size, sha256 };
+  return { total, roundTripped, problems };
 }
 
 async function measureTransfer({ size, name }) {
   const bytes = randomBytes(size);
   const pair = await loopbackPair({ counted: true });
-  const senderCrypto = { ms: 0 };
-  const receiverCrypto = { ms: 0 };
-  const transcode = { ms: 0 };
 
   try {
-    const senderWire = wireFor(pair.sender, transcode);
-    const receiverWire = wireFor(pair.receiver, transcode);
+    const senderChannel = recordingChannel(pair.sender);
+    const receiverChannel = recordingChannel(pair.receiver);
     const alice = await engine.createIdentity();
     const bob = await engine.createIdentity();
 
-    const [sent] = await Promise.all([
-      benchSender({
-        wire: senderWire,
+    // Snapshotted from inside onHandshake, which cli/protocol.mjs fires the
+    // instant the handshake settles and before the first payload frame is
+    // sealed. Every handshake byte has necessarily crossed the relay by then:
+    // the receiver could not have produced the ready frame without consuming
+    // the accept first.
+    let afterHandshake = null;
+
+    const [sent, received] = await Promise.all([
+      sendPayload({
+        channel: senderChannel,
         identity: alice,
         name,
         bytes,
-        clock: senderCrypto,
-        relay: pair.relay,
+        chunkSize: CHUNK,
+        onHandshake: () => {
+          afterHandshake = pair.relay.snapshot();
+        },
       }),
-      benchReceiver({ wire: receiverWire, identity: bob, clock: receiverCrypto }),
+      receivePayload({ channel: receiverChannel, identity: bob }),
     ]);
 
+    const afterPayload = pair.relay.snapshot();
+
+    if (received.stats.sha256 !== sent.sha256) {
+      throw new Error('the two ends disagree about the payload hash');
+    }
+    if (sha256Hex(bytes) !== sent.sha256) {
+      throw new Error('the sender hashed something other than the payload it was given');
+    }
+
+    // The accept is a handshake frame. Everything after it is the payload
+    // phase, which is the split --stats uses and the split section 1 reports.
+    const payloadFrames = senderChannel.sent.slice(1);
+    const sequence = checkFrameSequence({
+      senderFrames: senderChannel.sent,
+      receiverFrames: receiverChannel.sent,
+      chunks: sent.chunks,
+    });
+
+    const framedBytes = payloadFrames.reduce((n, f) => n + FRAME_PREFIX_BYTES + f.length, 0);
+    const measuredWire = afterHandshake ? afterPayload.up - afterHandshake.up : NaN;
+
     return {
-      ...sent,
-      senderCryptoMs: senderCrypto.ms,
-      receiverCryptoMs: receiverCrypto.ms,
-      transcodeMs: transcode.ms,
-      // MB is 1e6 bytes here, not 1048576, matching cli/protocol.mjs so the two
-      // throughput numbers can sit in the same table without a footnote.
-      throughputMBs: sent.wallMs > 0 ? size / 1e6 / (sent.wallMs / 1000) : 0,
+      plainBytes: sent.plainBytes,
+      chunks: sent.chunks,
+      handshakeMs: sent.handshakeMs,
+      receiverHandshakeMs: received.stats.handshakeMs,
+      wallMs: sent.wallMs,
+      sha256: sent.sha256,
+      backend: sent.backend,
+      // What the same envelopes would have cost on the 0.2.1 base64 wire,
+      // computed frame by frame from the frames that really went out.
+      tokenWire: tokenWireCost(payloadFrames),
+      // What cli/protocol.mjs says it put on the socket.
+      binaryWire: sent.wireBytes,
+      // What the relay saw. Three independent counts of the same thing, and
+      // the three of them agreeing is worth more than any one of them.
+      measuredWire,
+      framedBytes,
+      wireAgrees: measuredWire === sent.wireBytes && framedBytes === sent.wireBytes,
+      handshakeWireUp: afterHandshake ? afterHandshake.up : NaN,
+      handshakeWireDown: afterHandshake ? afterHandshake.down : NaN,
+      senderCryptoMs: sent.cryptoMs,
+      receiverCryptoMs: received.stats.cryptoMs,
+      sequence,
+      // MB is 1e6 bytes here, not 1048576, and the figure comes out of
+      // cli/protocol.mjs rather than being recomputed, so the two throughput
+      // numbers cannot disagree about the base.
+      throughputMBs: sent.throughputMBs,
     };
   } finally {
     await pair.close();
@@ -668,19 +656,51 @@ async function verifyAeadIdentity(samples = 200) {
 // column is one ML-KEM-768 keygen, encapsulation and decapsulation plus two
 // X25519 exchanges, and it is the same on any link. The transport column is
 // wall minus crypto and it is entirely a fact about the network.
+//
+// THIS IS THE ONE PLACE THE BENCH STILL DRIVES THE ENGINE ITSELF, and it is
+// worth saying why, because everything else in this file stopped doing that.
+//
+// cli/protocol.mjs reports one cumulative cryptoMs per transfer. It has no
+// handshake-only crypto figure and the onHandshake callback does not carry the
+// clock, so the crypto and transport split this section exists to show cannot
+// be read out of a real transfer: the smallest transfer that module will do
+// still seals a header and opens an acknowledgement after handshakeMs has
+// stopped, which would make transport go negative on loopback. Rather than
+// change what section 3 measures, the five engine calls are driven here.
+//
+// It is a timing harness for five calls, not a second copy of the wire
+// protocol: no chunk loop, no header JSON, no framing arithmetic, and the
+// protocol version comes from the import. The accounting deliberately matches
+// cli/protocol.mjs call for call. In that module the invite and the accept are
+// converted outside timed(), because both fall inside the window handshakeMs
+// already reports, while the ready frame's seal and every open are inside it
+// with their conversion included. This does the same.
+//
+// And it is checked rather than trusted: every counted transfer in section 1
+// hands back the real handshakeMs from cli/protocol.mjs, both sides, and those
+// medians are printed next to the harness's own. If the two ever diverge by
+// more than a factor of two the report says DRIFT and names it.
 
 const HANDSHAKE_FLIGHTS = 3;
 const HANDSHAKE_ROUND_TRIPS = HANDSHAKE_FLIGHTS / 2;
+
+/** Loud enough to be noticed, loose enough not to fire on a busy laptop. */
+const HANDSHAKE_DRIFT_FACTOR = 2;
+
+async function expectFrame(channel, what) {
+  const frame = await channel.receive();
+  if (frame === null || frame === undefined) {
+    throw new Error(`the channel closed while waiting for ${what}`);
+  }
+  return frame;
+}
 
 async function oneHandshake() {
   const pair = await loopbackPair({ counted: false });
   const senderCrypto = { ms: 0 };
   const receiverCrypto = { ms: 0 };
-  const transcode = { ms: 0 };
 
   try {
-    const senderWire = wireFor(pair.sender, transcode);
-    const receiverWire = wireFor(pair.receiver, transcode);
     const alice = await engine.createIdentity();
     const bob = await engine.createIdentity();
 
@@ -692,26 +712,44 @@ async function oneHandshake() {
       // this side, waiting for the peer to produce an invite is part of the
       // handshake whether or not the CPU was busy.
       const t0 = performance.now();
-      const invite = await senderWire.recv('the peer invite');
-      const opened = await charge(senderCrypto, () => engine.open(alice, invite, {}));
-      await senderWire.send(opened.reply);
-      const ready = await senderWire.recv('the receiver ready frame');
-      await charge(senderCrypto, () => engine.open(alice, ready, { session: opened.session }));
+      const inviteFrame = await expectFrame(pair.sender, 'the peer invite');
+      const opened = await charge(senderCrypto, () =>
+        engine.open(alice, fromWire(inviteFrame), {}),
+      );
+      if (opened.outcome !== 'invite') throw new Error(`expected an invite, got ${opened.outcome}`);
+      // Outside the clock, exactly as handshakeFrame is in cli/protocol.mjs.
+      await pair.sender.send(toWire(opened.reply));
+      const readyFrame = await expectFrame(pair.sender, 'the receiver ready frame');
+      const readyOpen = await charge(senderCrypto, () =>
+        engine.open(alice, fromWire(readyFrame), { session: opened.session }),
+      );
+      if (readyOpen.outcome !== 'message') throw new Error('expected a ready frame');
+      const readyBody = JSON.parse(readyOpen.plaintext);
+      if (readyBody.v !== PROTOCOL_VERSION) {
+        throw new Error(`receiver speaks protocol v${readyBody.v}, this is v${PROTOCOL_VERSION}`);
+      }
       senderWall = performance.now() - t0;
     })();
 
     const receiverSide = (async () => {
       const t0 = performance.now();
       const invited = await charge(receiverCrypto, () => engine.invite(bob));
-      await receiverWire.send(invited.token);
-      const reply = await receiverWire.recv('the sender reply');
+      await pair.receiver.send(toWire(invited.token));
+      const replyFrame = await expectFrame(pair.receiver, 'the sender reply');
       const accepted = await charge(receiverCrypto, () =>
-        engine.open(bob, reply, { pending: invited.pending }),
+        engine.open(bob, fromWire(replyFrame), { pending: invited.pending }),
       );
-      const ready = await charge(receiverCrypto, () =>
-        engine.seal(accepted.session, JSON.stringify({ v: PROTOCOL_VERSION, ready: true })),
-      );
-      await receiverWire.send(ready.token);
+      if (accepted.outcome !== 'accepted') {
+        throw new Error(`expected an accept, got ${accepted.outcome}`);
+      }
+      const ready = await charge(receiverCrypto, async () => {
+        const sealed = await engine.seal(
+          accepted.session,
+          JSON.stringify({ v: PROTOCOL_VERSION, ready: true }),
+        );
+        return { frame: toWire(sealed.token), session: sealed.session };
+      });
+      await pair.receiver.send(ready.frame);
       receiverWall = performance.now() - t0;
     })();
 
@@ -722,7 +760,6 @@ async function oneHandshake() {
       receiverWallMs: receiverWall,
       senderCryptoMs: senderCrypto.ms,
       receiverCryptoMs: receiverCrypto.ms,
-      transcodeMs: transcode.ms,
     };
   } finally {
     await pair.close();
@@ -816,20 +853,17 @@ const REPR_CHUNKS = chunkCount(REPR_FILE_BYTES);
 const REPR_REPS = 21;
 
 /**
- * Real sealed chunks, not synthetic ones.
+ * One settled session pair, driven through the engine with no sockets.
  *
- * The envelopes are produced by driving an actual handshake and then sealing
- * actual chunks, so the ratchet key, nonce, message numbers and ciphertext
- * length are what a transfer really carries. A hand built payload would time
- * the same code but would let a wrong field length go unnoticed.
+ * Used by the workload builder and by the seal path interop check. It is the
+ * receiver that invites and the sender that accepts, matching the CLI, so the
+ * sender is the Double Ratchet responder and cannot seal anything until the
+ * receiver has spoken once. That is what the ready frame is for.
  */
-async function representationWorkload() {
+async function settledPair() {
   const alice = await engine.createIdentity();
   const bob = await engine.createIdentity();
 
-  // The receiver invites and the sender accepts, matching the CLI. The sender
-  // is therefore the Double Ratchet responder and cannot seal anything until
-  // the receiver has spoken once, which is what the ready frame is for.
   const invited = await engine.invite(bob);
   const senderOpen = await engine.open(alice, invited.token, {});
   const receiverOpen = await engine.open(bob, senderOpen.reply, { pending: invited.pending });
@@ -839,7 +873,73 @@ async function representationWorkload() {
   );
   const readyOpen = await engine.open(alice, ready.token, { session: senderOpen.session });
 
-  let session = readyOpen.session;
+  return {
+    senderIdentity: alice,
+    receiverIdentity: bob,
+    senderSession: readyOpen.session,
+    receiverSession: ready.session,
+  };
+}
+
+/**
+ * The claim cli/protocol.mjs rests on, checked at the seal rather than at the
+ * codec: the bytes native calls are an internal shortcut and not a wire change.
+ *
+ * A frame sealed by engine.sealToEnvelopeBytes has to open through the token
+ * entry point, and a frame sealed by engine.sealBytes has to open through
+ * engine.openFromEnvelopeBytes. If either direction fails then the two halves
+ * of the seam are speaking different wires and the whole comparison below is
+ * about a format change rather than a shortcut.
+ *
+ * Nonces are random, so the two seals cannot be compared byte for byte against
+ * each other. Interoperability is the property that actually matters and it is
+ * the one being asserted.
+ */
+async function verifySealPathsInterop() {
+  const pair = await settledPair();
+  // ASCII so the token entry point's UTF-8 decode of the plaintext is lossless.
+  // Binary would come back mangled through engine.open and prove nothing.
+  const text = 'ratchet-ts seal path interop check. '.repeat(64);
+  const plaintext = enc.encode(text);
+  const problems = [];
+
+  const bytesSealed = await engine.sealToEnvelopeBytes(pair.senderSession, plaintext);
+  const openedAsToken = await engine.open(
+    pair.receiverIdentity,
+    fromWire(bytesSealed.envelope),
+    { session: pair.receiverSession },
+  );
+  if (openedAsToken.outcome !== 'message' || openedAsToken.plaintext !== text) {
+    problems.push('a frame from engine.sealToEnvelopeBytes did not open through engine.open');
+  }
+
+  // The original receiver session is untouched by the open above, because
+  // sessions are immutable and every open returns a new one. Both messages are
+  // number 0 in the same chain, so each opens cleanly against the base session.
+  const tokenSealed = await engine.sealBytes(pair.senderSession, plaintext);
+  const openedAsBytes = await engine.openFromEnvelopeBytes(
+    pair.receiverSession,
+    toWire(tokenSealed.token),
+  );
+  if (Buffer.compare(Buffer.from(openedAsBytes.plaintext), Buffer.from(plaintext)) !== 0) {
+    problems.push('a frame from engine.sealBytes did not open through engine.openFromEnvelopeBytes');
+  }
+
+  return { problems };
+}
+
+/**
+ * Real sealed chunks, not synthetic ones.
+ *
+ * The envelopes are produced by driving an actual handshake and then sealing
+ * actual chunks, so the ratchet key, nonce, message numbers and ciphertext
+ * length are what a transfer really carries. A hand built payload would time
+ * the same code but would let a wrong field length go unnoticed.
+ */
+async function representationWorkload() {
+  const pair = await settledPair();
+
+  let session = pair.senderSession;
   const bytes = randomBytes(REPR_FILE_BYTES);
   const tokens = [];
   for (let i = 0; i < REPR_CHUNKS; i += 1) {
@@ -851,7 +951,7 @@ async function representationWorkload() {
   }
 
   const payloads = tokens.map((t) => lib.decodeEnvelope(t));
-  const frames = HAS_ENVELOPE_BYTES ? payloads.map((p) => lib.encodeEnvelopeBytes(p)) : [];
+  const frames = payloads.map((p) => lib.encodeEnvelopeBytes(p));
   return { payloads, tokens, frames };
 }
 
@@ -871,21 +971,15 @@ function verifyRepresentationIdentity({ payloads, tokens, frames }) {
   for (let i = 0; i < payloads.length; i += 1) {
     // Payload out of the byte codec, back to a token: this is what cli fromWire
     // did, followed by whatever the engine would have handed the caller.
-    if (HAS_ENVELOPE_BYTES) {
-      const viaBytes = lib.encodeEnvelope(lib.decodeEnvelopeBytes(frames[i]));
-      if (viaBytes === tokens[i]) tokenMatches += 1;
-      else if (!firstFailure) firstFailure = `token differs after a byte round trip at chunk ${i}`;
+    const viaBytes = lib.encodeEnvelope(lib.decodeEnvelopeBytes(frames[i]));
+    if (viaBytes === tokens[i]) tokenMatches += 1;
+    else if (!firstFailure) firstFailure = `token differs after a byte round trip at chunk ${i}`;
 
-      // Payload out of the token codec, back to a frame: this is what cli
-      // toWire did.
-      const viaToken = lib.encodeEnvelopeBytes(lib.decodeEnvelope(tokens[i]));
-      if (Buffer.compare(Buffer.from(viaToken), Buffer.from(frames[i])) === 0) frameMatches += 1;
-      else if (!firstFailure) firstFailure = `frame differs after a token round trip at chunk ${i}`;
-    } else {
-      const viaToken = lib.encodeEnvelope(lib.decodeEnvelope(tokens[i]));
-      if (viaToken === tokens[i]) tokenMatches += 1;
-      else if (!firstFailure) firstFailure = `token differs after a token round trip at chunk ${i}`;
-    }
+    // Payload out of the token codec, back to a frame: this is what cli
+    // toWire did.
+    const viaToken = lib.encodeEnvelopeBytes(lib.decodeEnvelope(tokens[i]));
+    if (Buffer.compare(Buffer.from(viaToken), Buffer.from(frames[i])) === 0) frameMatches += 1;
+    else if (!firstFailure) firstFailure = `frame differs after a token round trip at chunk ${i}`;
   }
 
   return { samples: payloads.length, tokenMatches, frameMatches, firstFailure, firstToken: tokens[0] };
@@ -925,19 +1019,17 @@ async function measureRepresentation({ reps = REPR_REPS } = {}) {
     for (const p of payloads) sink += lib.decodeEnvelope(lib.encodeEnvelope(p)).ciphertext.length;
     samples.roundTripToken.push(performance.now() - t0);
 
-    if (HAS_ENVELOPE_BYTES) {
-      t0 = performance.now();
-      for (const p of payloads) sink += lib.encodeEnvelopeBytes(p).length;
-      samples.encodeBytes.push(performance.now() - t0);
+    t0 = performance.now();
+    for (const p of payloads) sink += lib.encodeEnvelopeBytes(p).length;
+    samples.encodeBytes.push(performance.now() - t0);
 
-      t0 = performance.now();
-      for (const f of frames) sink += lib.decodeEnvelopeBytes(f).ciphertext.length;
-      samples.decodeBytes.push(performance.now() - t0);
+    t0 = performance.now();
+    for (const f of frames) sink += lib.decodeEnvelopeBytes(f).ciphertext.length;
+    samples.decodeBytes.push(performance.now() - t0);
 
-      t0 = performance.now();
-      for (const p of payloads) sink += lib.decodeEnvelopeBytes(lib.encodeEnvelopeBytes(p)).ciphertext.length;
-      samples.roundTripBytes.push(performance.now() - t0);
-    }
+    t0 = performance.now();
+    for (const p of payloads) sink += lib.decodeEnvelopeBytes(lib.encodeEnvelopeBytes(p)).ciphertext.length;
+    samples.roundTripBytes.push(performance.now() - t0);
   }
 
   return { ...samples, sink, workload };
@@ -956,6 +1048,16 @@ async function oneRun() {
 
   out.baseline = await measureTransfer({ size: BASELINE_SIZE, name: BASELINE_NAME });
   out.aead = await measureAead();
+
+  // The real module's own handshake numbers, pooled from every counted transfer
+  // this run performed. These are the anti-drift reference for section 3.
+  const cliTransfers = [...SIZES.map((s) => out.sizes[s]), out.baseline];
+  out.cliHandshake = {
+    senderMs: median(cliTransfers.map((t) => t.handshakeMs)),
+    receiverMs: median(cliTransfers.map((t) => t.receiverHandshakeMs)),
+    wireUp: median(cliTransfers.map((t) => t.handshakeWireUp)),
+    wireDown: median(cliTransfers.map((t) => t.handshakeWireDown)),
+  };
 
   // A handful of handshakes per run, because one handshake is a single sample
   // and this is the noisiest thing in the file.
@@ -999,14 +1101,16 @@ await measureRepresentation({ reps: 3 });
 // ---------------------------------------------------------------------------
 
 const aeadCheck = await verifyAeadIdentity(200);
+const interopCheck = await verifySealPathsInterop();
 
 console.log(`\nratchet-ts wire benchmark`);
 console.log(`${process.version}  |  ${(os.cpus()[0] || {}).model}  |  ${os.platform()}/${os.arch()}`);
 console.log(
   `${RUNS} run${RUNS === 1 ? '' : 's'}  |  loopback ${HOST} through a counting relay  |  chunk ${CHUNK} B`,
 );
+console.log('wire: self describing binary envelope, u32 length prefixed frames');
 console.log(
-  `wire: ${WIRE_MODE === 'binary' ? 'self describing binary envelope' : 'OCX1 base64url token'}, u32 length prefixed frames`,
+  `payload path: cli/protocol.mjs sendPayload and receivePayload, protocol v${PROTOCOL_VERSION}, called not copied`,
 );
 console.log(
   `aead: @noble/ciphers direct${HAS_LIB_AEAD ? `, and src/aead.ts reporting backend "${LIB_AEAD_BACKEND}"` : ', src/aead.ts not exported from dist'}`,
@@ -1027,12 +1131,52 @@ for (let r = 1; r <= RUNS; r += 1) {
 }
 process.stdout.write('                    \r');
 
+// --- 0. the bench agrees with the CLI ---------------------------------------
+//
+// Printed first and printed even when it passes, because a guard nobody sees is
+// a guard nobody trusts. Everything below section 0 is only worth reading if
+// this says PASS.
+
+const sequences = [...SIZES.map((s) => runs[0].sizes[s]), runs[0].baseline].map((t) => t.sequence);
+const sequenceProblems = sequences.flatMap((s) => s.problems);
+const framesChecked = sequences.reduce((n, s) => n + s.total, 0);
+const framesBinary = sequences.reduce((n, s) => n + s.roundTripped, 0);
+const wireDisagreements = [...SIZES.map((s) => runs[0].sizes[s]), runs[0].baseline].filter(
+  (t) => !t.wireAgrees,
+);
+
+console.log('0. the bench and the CLI are the same code');
+console.log(
+  `   frame sequence: ${sequenceProblems.length === 0 ? 'PASS' : 'FAIL'}, ${framesBinary}/${framesChecked} frames are self describing binary envelopes`,
+);
+for (const problem of sequenceProblems) console.log(`   FAIL: ${problem}`);
+console.log(
+  `   byte counts agree three ways (relay, cli/protocol.mjs, frame arithmetic): ${wireDisagreements.length === 0 ? 'PASS' : 'FAIL'}`,
+);
+for (const t of wireDisagreements) {
+  console.log(
+    `   FAIL at ${humanBytes(t.plainBytes)}: relay ${t.measuredWire}, cli ${t.binaryWire}, frames ${t.framedBytes}`,
+  );
+}
+console.log(
+  `   seal paths interoperate on one wire: ${interopCheck.problems.length === 0 ? 'PASS' : 'FAIL'}`,
+);
+for (const problem of interopCheck.problems) console.log(`   FAIL: ${problem}`);
+console.log(
+  `   protocol version is imported from cli/protocol.mjs, not restated here: v${PROTOCOL_VERSION}.`,
+);
+console.log(
+  '   Both ends of a real transfer reject a peer whose version disagrees, so a completed',
+);
+console.log('   transfer above is itself the version check.\n');
+
 // --- 1. bytes on the wire ---------------------------------------------------
 
 console.log('1. bytes on the wire');
 console.log('   Sealed header plus sealed chunks, sender to receiver, counted by a relay');
 console.log('   sitting between the two sockets. Handshake frames are in section 3, which');
-console.log('   is the same split cli/protocol.mjs uses when it prints --stats.\n');
+console.log('   is the same split cli/protocol.mjs uses when it prints --stats, because it');
+console.log('   is cli/protocol.mjs doing the sending.\n');
 
 console.table(
   SIZES.map((size) => {
@@ -1052,13 +1196,10 @@ console.table(
 );
 
 console.log('   the same envelopes costed against each wire format\n');
-console.log('   0.2.1: OCX1 base64url token plus a newline delimiter.');
-console.log(
-  `   binary: self describing envelope plus a u32 length prefix${HAS_ENVELOPE_BYTES ? ', measured' : ', DERIVED from the base64 length because dist lacks encodeEnvelopeBytes'}.`,
-);
-console.log(
-  `   the "on the wire" column above is whichever of these this build actually sent (${WIRE_MODE}).\n`,
-);
+console.log('   0.2.1: OCX1 base64url token plus a newline delimiter. Reconstructed exactly,');
+console.log('   frame by frame, from the envelopes this build really sent.');
+console.log('   binary: self describing envelope plus a u32 length prefix, measured. This is');
+console.log('   what the "on the wire" column above is.\n');
 
 console.table(
   SIZES.map((size) => {
@@ -1094,18 +1235,31 @@ console.table(
     payload: humanBytes(runs[0].sizes[size].plainBytes),
     'sender crypto ms': ms(agg(runs, (r) => r.sizes[size].senderCryptoMs).median),
     'receiver crypto ms': ms(agg(runs, (r) => r.sizes[size].receiverCryptoMs).median),
-    'transcode ms': ms(agg(runs, (r) => r.sizes[size].transcodeMs).median),
     'wall ms': ms(agg(runs, (r) => r.sizes[size].wallMs).median),
     'MB/s': agg(runs, (r) => r.sizes[size].throughputMBs).median.toFixed(2),
     spread: spreadOf(runs, (r) => r.sizes[size].wallMs),
   })),
 );
-console.log(
-  '   transcode is this harness converting between the token and binary forms because',
-);
-console.log(
-  '   engine.seal returns a token. A binary native call path would not pay it.\n',
-);
+console.log('   THE transcode ms COLUMN IS GONE, and it is not reading zero somewhere off');
+console.log('   screen. It measured this harness turning a base64url token into envelope');
+console.log('   bytes and back again, which it only ever did because the copy of the CLI it');
+console.log('   used to carry called engine.sealBytes and engine.openBytes. cli/protocol.mjs');
+console.log('   stopped calling those on the payload path in 0.3.1 and calls');
+console.log('   engine.sealToEnvelopeBytes and engine.openFromEnvelopeBytes instead, so no');
+console.log('   such conversion happens in the shipping code and there is nothing left to');
+console.log('   charge to it. This file now calls that module rather than reimplementing it,');
+console.log('   so the column cannot come back by accident.');
+console.log('   Nothing was made faster to achieve that. Work the shipping code does not do');
+console.log('   was taken out of the measurement. Held against one unchanged build, swapping');
+console.log('   the dead token path for the real one moved a 10.5 MB transfer from 4.4 MB/s');
+console.log('   to 47.7 MB/s, about eleven times, and a 1.0 MB transfer about five times.');
+console.log('   The earlier numbers were wrong, not the library.');
+console.log('   If the figures above are larger again than that, do not credit this file for');
+console.log('   the difference. src also got faster in the same window, separately measured');
+console.log('   at about 1.6x on the real path at 10.5 MB. See bench/README.md, "The 0.3.2');
+console.log('   correction", for the two effects held apart.');
+console.log('   The crypto columns are cli/protocol.mjs reporting its own clock, the same');
+console.log('   cryptoMs that ratchet send --stats prints, not a number computed here.\n');
 
 // --- 2. AEAD throughput -----------------------------------------------------
 
@@ -1183,6 +1337,62 @@ console.table(
   }),
 );
 
+// The drift guard. The table above is the one harness in this file that still
+// drives the engine itself; these two numbers come out of the real module
+// during the section 1 transfers. They measure the same three flights, so they
+// have no business disagreeing.
+const cliSender = agg(runs, (r) => r.cliHandshake.senderMs).median;
+const cliReceiver = agg(runs, (r) => r.cliHandshake.receiverMs).median;
+const benchSender = agg(runs, (r) => r.handshake.senderWallMs).median;
+const benchReceiver = agg(runs, (r) => r.handshake.receiverWallMs).median;
+
+console.log('   the same handshake as cli/protocol.mjs measures it, for comparison\n');
+console.table([
+  {
+    side: 'sender',
+    'this harness ms': ms(benchSender),
+    'cli/protocol.mjs ms': ms(cliSender),
+    ratio: `${(benchSender / cliSender).toFixed(2)}x`,
+  },
+  {
+    side: 'receiver',
+    'this harness ms': ms(benchReceiver),
+    'cli/protocol.mjs ms': ms(cliReceiver),
+    ratio: `${(benchReceiver / cliReceiver).toFixed(2)}x`,
+  },
+]);
+
+const drifted = [
+  ['sender', benchSender, cliSender],
+  ['receiver', benchReceiver, cliReceiver],
+].filter(
+  ([, a, b]) =>
+    !Number.isFinite(a / b) || a / b > HANDSHAKE_DRIFT_FACTOR || a / b < 1 / HANDSHAKE_DRIFT_FACTOR,
+);
+if (drifted.length) {
+  console.log(
+    `   DRIFT: the harness and cli/protocol.mjs disagree by more than ${HANDSHAKE_DRIFT_FACTOR}x on ${drifted.map(([s]) => s).join(' and ')}.`,
+  );
+  console.log('   One of the two changed and the other did not. Section 3 is not trustworthy');
+  console.log('   until they agree again.\n');
+} else {
+  console.log(
+    `   Within ${HANDSHAKE_DRIFT_FACTOR}x, so the harness is still doing what the CLI does. The cli column`,
+  );
+  console.log('   carries the extra relay hop the harness does not, which is worth about');
+  console.log(`   ${ms(rtt)} ms, and it is a whole transfer's handshake rather than fifteen in a row.\n`);
+}
+
+const handshakeUp = agg(runs, (r) => r.cliHandshake.wireUp).median;
+const handshakeDown = agg(runs, (r) => r.cliHandshake.wireDown).median;
+console.log(
+  `   handshake bytes, counted by the relay: ${humanBytes(handshakeUp)} sender to receiver,`,
+);
+console.log(
+  `   ${humanBytes(handshakeDown)} receiver to sender. Deliberately outside the section 1 totals: a`,
+);
+console.log('   fixed post-quantum handshake folded into an overhead percentage defined');
+console.log('   against the payload would say more about the file size than the protocol.');
 console.log(`   loopback round trip: ${ms(rtt)} ms median over 200 probes.`);
 console.log(
   `   ${HANDSHAKE_ROUND_TRIPS} round trips of that is ${ms(rtt * HANDSHAKE_ROUND_TRIPS)} ms, which is what the transport column`,
@@ -1248,7 +1458,7 @@ console.table([
 console.log('   The only two rows that mean anything across those two columns are the byte');
 console.log('   counts and, loosely, the crypto time. Throughput is a property of the link.');
 console.log(
-  `   Same payload on the binary envelope wire: ${humanBytes(base.binaryWire)}, ${pct(((base.binaryWire - base.plainBytes) / base.plainBytes) * 100)} overhead, ${pct(((BASELINE_0_2_1.wireBytes - base.binaryWire) / BASELINE_0_2_1.wireBytes) * 100)} fewer bytes than 0.2.1${HAS_ENVELOPE_BYTES ? '.' : ' (derived, see the note at the top).'}`,
+  `   Same payload on the binary envelope wire: ${humanBytes(base.binaryWire)}, ${pct(((base.binaryWire - base.plainBytes) / base.plainBytes) * 100)} overhead, ${pct(((BASELINE_0_2_1.wireBytes - base.binaryWire) / BASELINE_0_2_1.wireBytes) * 100)} fewer bytes than 0.2.1.`,
 );
 console.log('   A before and after over one link does exist, and it is not this table: the');
 console.log('   repository README, under "The same file over a real network", moves the same');
@@ -1296,7 +1506,7 @@ console.log(
 );
 console.log('   whole workload, not one chunk, and it is measured on this machine.\n');
 
-if (HAS_ENVELOPE_BYTES) {
+{
   const ok =
     reprCheck.tokenMatches === reprCheck.samples && reprCheck.frameMatches === reprCheck.samples;
   console.log(
@@ -1306,8 +1516,6 @@ if (HAS_ENVELOPE_BYTES) {
     '   Nothing on the socket changes when the base64 hop is removed. If that line ever',
   );
   console.log('   says FAIL, the saving was bought by changing the wire and the release is wrong.');
-} else {
-  console.log('   dist lacks encodeEnvelopeBytes, so only the token column below is real.');
 }
 if (reprCheck.firstFailure) console.log(`   FIRST FAILURE: ${reprCheck.firstFailure}`);
 console.log('');
@@ -1323,16 +1531,14 @@ const reprRow = (operation, a, versus) => ({
   'vs bytes': versus && Number.isFinite(versus.median) ? `${(a.median / versus.median).toFixed(1)}x` : '',
 });
 
-console.table(
-  [
-    reprRow('encode payload -> token', encodeToken, HAS_ENVELOPE_BYTES ? encodeBytes : null),
-    ...(HAS_ENVELOPE_BYTES ? [reprRow('encode payload -> bytes', encodeBytes, null)] : []),
-    reprRow('decode token -> payload', decodeToken, HAS_ENVELOPE_BYTES ? decodeBytes : null),
-    ...(HAS_ENVELOPE_BYTES ? [reprRow('decode bytes -> payload', decodeBytes, null)] : []),
-    reprRow('round trip via token', roundTripToken, HAS_ENVELOPE_BYTES ? roundTripBytes : null),
-    ...(HAS_ENVELOPE_BYTES ? [reprRow('round trip via bytes', roundTripBytes, null)] : []),
-  ],
-);
+console.table([
+  reprRow('encode payload -> token', encodeToken, encodeBytes),
+  reprRow('encode payload -> bytes', encodeBytes, null),
+  reprRow('decode token -> payload', decodeToken, decodeBytes),
+  reprRow('decode bytes -> payload', decodeBytes, null),
+  reprRow('round trip via token', roundTripToken, roundTripBytes),
+  reprRow('round trip via bytes', roundTripBytes, null),
+]);
 console.log(
   `   ${encodeToken.n} timed passes per row. Spread here is p10 to p90 over the median, not the best`,
 );
@@ -1341,9 +1547,7 @@ console.log(
 );
 console.log('   collection pauses, so the max column carries the tail instead of the summary.\n');
 
-if (!HAS_ENVELOPE_BYTES) {
-  console.log('');
-} else {
+{
   const deleted = roundTripToken.median * CLI_BASE64_ROUND_TRIPS_PER_FRAME_0_3_0;
   const survives = encodeBytes.median + decodeBytes.median;
 
@@ -1387,7 +1591,7 @@ if (!HAS_ENVELOPE_BYTES) {
     {
       quantity: 'sender crypto, same payload, section 4',
       value: `${ms(baseCrypto)} ms`,
-      where: 'seal and open only, packaging excluded',
+      where: 'cli/protocol.mjs cryptoMs, the bytes native path',
     },
     {
       quantity: 'deleted as a share of that crypto',
@@ -1419,6 +1623,16 @@ if (!HAS_ENVELOPE_BYTES) {
     '   base64 inside sealBytes and openBytes was timed, the identical base64 in toWire and',
   );
   console.log(
-    '   fromWire was not. In 0.3.1 the chunk path pays neither and what is left is inside.\n',
+    '   fromWire was not. In 0.3.1 the chunk path pays neither and what is left is inside.',
   );
+  console.log(
+    '   The share row got bigger when this file started calling cli/protocol.mjs instead of',
+  );
+  console.log(
+    '   copying it, because the crypto figure it divides by lost the base64 that the copy',
+  );
+  console.log(
+    '   was still doing. The deleted milliseconds did not move; the thing they are measured',
+  );
+  console.log('   against got smaller, which is the correct denominator.\n');
 }

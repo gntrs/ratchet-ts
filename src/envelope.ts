@@ -26,13 +26,34 @@ export const ENVELOPE_VERSION = 'OCX1';
 
 const KINDS: readonly EnvelopeKind[] = ['invite', 'accept', 'message'];
 
+/**
+ * Accumulates the pieces of a body and then writes them out exactly once.
+ *
+ * The point of keeping the pieces rather than growing a buffer is that the
+ * total is known before a single byte moves, so the caller can allocate the
+ * final destination, header and all, and have the body land straight into it.
+ * That is why `writeInto` exists alongside `finish`: `finish` is the
+ * convenience for the string path, which needs a standalone body to base64,
+ * and `writeInto` is what `encodeEnvelopeBytes` uses to avoid building a body
+ * buffer only to immediately copy it somewhere two bytes to the right.
+ */
 class Writer {
   private readonly parts: Uint8Array[] = [];
   private size = 0;
 
+  /** Bytes the accumulated parts will occupy. Known before anything is copied. */
+  get length(): number {
+    return this.size;
+  }
+
   u32(value: number): void {
+    // Written by hand rather than through a DataView: same big endian bytes,
+    // same ToUint32 truncation, one fewer object allocated per field.
     const buf = new Uint8Array(4);
-    new DataView(buf.buffer).setUint32(0, value, false);
+    buf[0] = (value >>> 24) & 0xff;
+    buf[1] = (value >>> 16) & 0xff;
+    buf[2] = (value >>> 8) & 0xff;
+    buf[3] = value & 0xff;
     this.raw(buf);
   }
 
@@ -40,7 +61,8 @@ class Writer {
   blob(value: Uint8Array): void {
     if (value.length > 0xffff) throw new RangeError('field too long for a u16 length prefix');
     const buf = new Uint8Array(2);
-    new DataView(buf.buffer).setUint16(0, value.length, false);
+    buf[0] = (value.length >>> 8) & 0xff;
+    buf[1] = value.length & 0xff;
     this.raw(buf);
     this.raw(value);
   }
@@ -54,13 +76,19 @@ class Writer {
     this.size += value.length;
   }
 
+  /** Copies the parts into `out` starting at `at`. Returns the end offset. */
+  writeInto(out: Uint8Array, at: number): number {
+    let cursor = at;
+    for (const p of this.parts) {
+      out.set(p, cursor);
+      cursor += p.length;
+    }
+    return cursor;
+  }
+
   finish(): Uint8Array {
     const out = new Uint8Array(this.size);
-    let at = 0;
-    for (const p of this.parts) {
-      out.set(p, at);
-      at += p.length;
-    }
+    this.writeInto(out, 0);
     return out;
   }
 }
@@ -72,27 +100,72 @@ class Reader {
 
   u32(): number {
     if (this.at + 4 > this.buf.length) fail('malformed_token', 'truncated integer field');
-    const value = new DataView(this.buf.buffer, this.buf.byteOffset + this.at, 4).getUint32(0, false);
+    const b = this.buf;
+    const i = this.at;
+    // Same big endian read a DataView would do, without allocating one.
+    const value = ((b[i]! << 24) | (b[i + 1]! << 16) | (b[i + 2]! << 8) | b[i + 3]!) >>> 0;
     this.at += 4;
     return value;
   }
 
-  blob(): Uint8Array {
+  /** Bounds checked u16 length prefix. Leaves `at` on the first field byte. */
+  private fieldLength(): number {
     if (this.at + 2 > this.buf.length) fail('malformed_token', 'truncated length prefix');
-    const len = new DataView(this.buf.buffer, this.buf.byteOffset + this.at, 2).getUint16(0, false);
+    const len = (this.buf[this.at]! << 8) | this.buf[this.at + 1]!;
     this.at += 2;
     if (this.at + len > this.buf.length) fail('malformed_token', 'length prefix overruns the payload');
-    // Copy rather than subarray: callers keep these around inside session state
-    // and must not share a backing buffer with the decoded token.
-    //
-    // Constructing a fresh Uint8Array rather than calling `this.buf.slice()`,
-    // because slice only copies for a plain Uint8Array. Node's Buffer inherits
-    // from Uint8Array but overrides slice as a deprecated alias of subarray,
-    // which shares memory. A Buffer is exactly what a socket hands the CLI on
-    // every frame, so the one input shape this guarantee mattered most for was
-    // the one shape that silently did not get it. This also normalises the
-    // output: a decoded field is a Uint8Array whatever the caller passed in.
+    return len;
+  }
+
+  /**
+   * A copy. This is the default and it is the right default.
+   *
+   * Callers keep these around inside session state and must not share a backing
+   * buffer with the decoded token. A socket reader that pools or reuses its
+   * read buffer would otherwise watch a stored ratchet key or nonce change
+   * underneath it, which is a bug that reproduces only under load.
+   *
+   * Constructing a fresh Uint8Array rather than calling `this.buf.slice()`,
+   * because slice only copies for a plain Uint8Array. Node's Buffer inherits
+   * from Uint8Array but overrides slice as a deprecated alias of subarray,
+   * which shares memory. A Buffer is exactly what a socket hands the CLI on
+   * every frame, so the one input shape this guarantee mattered most for was
+   * the one shape that silently did not get it. This also normalises the
+   * output: a decoded field is a Uint8Array whatever the caller passed in.
+   */
+  blob(): Uint8Array {
+    const len = this.fieldLength();
     const out = new Uint8Array(this.buf.subarray(this.at, this.at + len));
+    this.at += len;
+    return out;
+  }
+
+  /**
+   * A view, opt in, and only ever used for the ciphertext.
+   *
+   * READ THE PARAGRAPH ABOVE BEFORE REACHING FOR THIS. The copy that `blob`
+   * makes is not paranoia and it must not be "simplified away" for
+   * `ratchetPublic` or `nonce`: those two land in long lived session state, and
+   * the whole reason `blob` copies is that they must outlive a transient
+   * network buffer.
+   *
+   * The ciphertext is the one field with a different life. It is handed
+   * straight to the AEAD, read once, and dropped; nothing that survives the
+   * call retains it. Copying 64 KiB per chunk so that it can be read once and
+   * discarded was measured at more than a tenth of the whole receive path.
+   *
+   * Still opt in rather than automatic, because the caller is the only one who
+   * knows whether it is going to reuse the frame buffer. `decodeEnvelopeBytes`
+   * defaults to copying, so the default behaviour of the public API is
+   * unchanged and no existing caller can be surprised by this.
+   *
+   * A plain Uint8Array over the same memory rather than `subarray`, because
+   * Buffer.prototype.subarray hands back a Buffer, and a decoded field being a
+   * Uint8Array whatever came in is a promise the copying path already makes.
+   */
+  blobView(): Uint8Array {
+    const len = this.fieldLength();
+    const out = new Uint8Array(this.buf.buffer, this.buf.byteOffset + this.at, len);
     this.at += len;
     return out;
   }
@@ -106,21 +179,26 @@ class Reader {
   }
 }
 
-function encodeBody(payload: EnvelopePayload): Uint8Array {
+/**
+ * The field order, and nothing else. Returns the Writer rather than its bytes
+ * so a caller that already knows where the body belongs can have it written
+ * there directly instead of into a temporary.
+ */
+function bodyWriter(payload: EnvelopePayload): Writer {
   const w = new Writer();
   switch (payload.kind) {
     case 'invite':
       w.text(payload.conversationId);
       w.blob(payload.sender.classicalPublic);
       w.blob(payload.sender.pqPublic);
-      return w.finish();
+      return w;
     case 'accept':
       w.text(payload.conversationId);
       w.blob(payload.sender.classicalPublic);
       w.blob(payload.sender.pqPublic);
       w.blob(payload.kemCiphertext);
       w.blob(payload.ratchetPublic);
-      return w.finish();
+      return w;
     case 'message':
       w.text(payload.conversationId);
       w.blob(payload.ratchetPublic);
@@ -130,11 +208,19 @@ function encodeBody(payload: EnvelopePayload): Uint8Array {
       // Ciphertext is last and still length prefixed, so a truncated paste is
       // caught by the reader rather than silently decrypting a shorter body.
       w.blob(payload.ciphertext);
-      return w.finish();
+      return w;
   }
 }
 
-function decodeBody(kind: EnvelopeKind, body: Uint8Array): EnvelopePayload {
+function encodeBody(payload: EnvelopePayload): Uint8Array {
+  return bodyWriter(payload).finish();
+}
+
+function decodeBody(
+  kind: EnvelopeKind,
+  body: Uint8Array,
+  borrowCiphertext = false,
+): EnvelopePayload {
   const r = new Reader(body);
   switch (kind) {
     case 'invite': {
@@ -167,7 +253,9 @@ function decodeBody(kind: EnvelopeKind, body: Uint8Array): EnvelopePayload {
       const messageNumber = r.u32();
       const previousChainLength = r.u32();
       const nonce = r.blob();
-      const ciphertext = r.blob();
+      // The only field that is ever a view, and only when the caller asked.
+      // See Reader.blobView for why this one and not the two above it.
+      const ciphertext = borrowCiphertext ? r.blobView() : r.blob();
       r.end();
       const out: MessagePayload = {
         kind,
@@ -223,16 +311,74 @@ const BINARY_KIND_BY_TAG: readonly (EnvelopeKind | undefined)[] = [
   'message',
 ];
 
-export function encodeEnvelopeBytes(payload: EnvelopePayload): Uint8Array {
-  const body = encodeBody(payload);
-  const out = new Uint8Array(2 + body.length);
-  out[0] = BINARY_ENVELOPE_VERSION;
-  out[1] = BINARY_KIND_TAGS[payload.kind];
-  out.set(body, 2);
+export interface EncodeEnvelopeBytesOptions {
+  /**
+   * Leave this many untouched bytes in front of the envelope.
+   *
+   * The returned array is `reserve + envelopeLength` long, the reserved bytes
+   * are zero, and the envelope starts at index `reserve`. It exists so a
+   * transport with a fixed size header can write that header into the buffer it
+   * was handed rather than allocating a second buffer and copying a whole
+   * envelope into it one byte later. Length prefixed framing is the case that
+   * motivated it, and at 64 KiB a chunk that copy was the single largest
+   * avoidable cost on the send path.
+   *
+   * Zero, absent, and the whole options object being absent all mean the same
+   * thing: an envelope starting at index 0, exactly as before.
+   */
+  readonly reserve?: number;
+}
+
+/**
+ * One allocation, one pass.
+ *
+ * The body length is known from the field sizes before any byte moves, so the
+ * header, the optional reserved prefix and the body all land in the same array
+ * on the first and only copy. The previous shape built the body into its own
+ * buffer and then copied that buffer two bytes to the right, which meant every
+ * envelope was written twice.
+ *
+ * Options are an object rather than a bare number on purpose: this function is
+ * exactly the shape people pass to `Array.prototype.map`, which would hand a
+ * bare second parameter the element index. An object bag reads `undefined` out
+ * of a stray number and behaves as if nothing was passed.
+ */
+export function encodeEnvelopeBytes(
+  payload: EnvelopePayload,
+  options?: EncodeEnvelopeBytesOptions,
+): Uint8Array {
+  const reserve = options?.reserve ?? 0;
+  if (!Number.isInteger(reserve) || reserve < 0) {
+    throw new RangeError(`reserve must be a non-negative integer, got ${String(options?.reserve)}`);
+  }
+  const w = bodyWriter(payload);
+  const out = new Uint8Array(reserve + 2 + w.length);
+  out[reserve] = BINARY_ENVELOPE_VERSION;
+  out[reserve + 1] = BINARY_KIND_TAGS[payload.kind];
+  w.writeInto(out, reserve + 2);
   return out;
 }
 
-export function decodeEnvelopeBytes(bytes: Uint8Array): EnvelopePayload {
+export interface DecodeEnvelopeBytesOptions {
+  /**
+   * Return `ciphertext` as a view into `bytes` instead of a copy.
+   *
+   * Only the ciphertext is ever borrowed. `ratchetPublic` and `nonce` are
+   * copied whatever this says, because they land in long lived session state
+   * and must not alias a transient network buffer. See `Reader.blobView`.
+   *
+   * Only safe when the caller will not reuse or overwrite `bytes` until it has
+   * finished with the returned ciphertext, which in practice means handing it
+   * straight to the AEAD and dropping it. Off by default, so the behaviour of
+   * this function is unchanged for every caller that does not ask.
+   */
+  readonly borrowCiphertext?: boolean;
+}
+
+export function decodeEnvelopeBytes(
+  bytes: Uint8Array,
+  options?: DecodeEnvelopeBytesOptions,
+): EnvelopePayload {
   // TypeScript says this is a Uint8Array. JavaScript callers, and anything that
   // reached here through a JSON round trip or an await that resolved to
   // undefined, say otherwise. Without this line `null` and `undefined` escape
@@ -250,10 +396,12 @@ export function decodeEnvelopeBytes(bytes: Uint8Array): EnvelopePayload {
   }
   const kind = BINARY_KIND_BY_TAG[bytes[1]!];
   if (kind === undefined) fail('malformed_token', `unknown envelope kind tag ${bytes[1]}`);
-  // subarray, not slice: Reader copies every field it hands back, so nothing
-  // that escapes this function shares a buffer with the caller's frame anyway,
-  // and copying the whole body here would double the cost of the fast path.
-  return decodeBody(kind, bytes.subarray(2));
+  // subarray, not slice: by default Reader copies every field it hands back, so
+  // nothing that escapes this function shares a buffer with the caller's frame,
+  // and copying the whole body here would double the cost of the fast path. The
+  // one exception is an explicitly borrowed ciphertext, which the option above
+  // spells out.
+  return decodeBody(kind, bytes.subarray(2), options?.borrowCiphertext === true);
 }
 
 export function decodeEnvelope(token: EnvelopeToken): EnvelopePayload {

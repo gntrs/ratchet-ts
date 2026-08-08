@@ -17,11 +17,24 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { basename, delimiter, dirname, extname, join, resolve } from 'node:path';
+import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { fingerprint, formatFingerprint, isCryptoFailure } from '../dist/index.js';
 import { connect, listen } from '../cli/frame.mjs';
 import { identityFile, loadIdentity, resetIdentity } from '../cli/store.mjs';
+import {
+  addressOf,
+  classifyPeer,
+  findPeers,
+  forgetPeer,
+  listPeers,
+  loadPeers,
+  markVerified,
+  peersFile,
+  recordSighting,
+  savePeers,
+} from '../cli/peers.mjs';
 import { DEFAULT_CHUNK_BYTES, MAX_CHUNK_BYTES, receivePayload, sendPayload } from '../cli/protocol.mjs';
 import { box, color, humanBytes, humanMs, statsTable, words } from '../cli/format.mjs';
 
@@ -266,7 +279,7 @@ function reportError(err) {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-const VALUE_FLAGS = new Set(['--port', '--out', '--to', '--text', '--chunk']);
+const VALUE_FLAGS = new Set(['--port', '--out', '--to', '--text', '--chunk', '--label']);
 const BOOL_FLAGS = new Set(['--once', '--stats', '--json', '--help', '--version', '--reset', '--yes', '-h', '-v']);
 const ALIASES = { '-h': '--help', '-v': '--version' };
 
@@ -410,13 +423,17 @@ EXAMPLES
   pg_dump mydb | ratchet send - --to 192.168.1.42
   ratchet chat --to 192.168.1.42            type back and forth, nothing saved
   ratchet id                                your six words and your key file
+  ratchet peers                             who this machine has talked to
 
 COMMANDS
   recv [--port N] [--out DIR] [--once]   listen, then write what arrives
   send PATH --to HOST[:PORT]             send one file, or - to read stdin
   send --text "..." --to HOST[:PORT]     send a message instead of a file
-  chat [--port N] | chat --to HOST[:PORT]   live session, nothing touches disk
+  chat [--port N] | chat --to HOST[:PORT]   live session, no messages on disk
   id [--reset --yes]                     this machine safety words and key file
+  peers                                  everyone seen before, and who is verified
+  peers verify WHO [--label NAME]        record that you compared the words aloud
+  peers forget WHO                       drop one peer, WHO is a label or hex prefix
 
 FLAGS
   --port N       listen on N instead of ${DEFAULT_PORT}
@@ -424,6 +441,7 @@ FLAGS
   --once         recv handles one transfer and exits
   --to HOST      HOST, HOST:PORT, or [IPv6]:PORT
   --text "..."   send a message instead of a file
+  --label NAME   the name to file a verified peer under
   --stats        add the full measurement table under the summary line
   --chunk N      plaintext bytes per sealed frame (default ${DEFAULT_CHUNK_BYTES}, max ${MAX_CHUNK_BYTES})
   --json         result as JSON on stdout, all human output on stderr
@@ -436,6 +454,10 @@ WORTH KNOWING
   a byte count and nothing else.
   What lands on the receiving disk is plain, unencrypted content. The wire was
   protected, the file is not.
+  Every completed handshake writes one row to ~/.ratchet/peers.json: the peer
+  key, its six words, the addresses it came from, and dates. That is how a
+  changed key gets noticed. No filename and no message is ever recorded there.
+  Delete a row with  ratchet peers forget WHO.
   RATCHET_HOME moves the key file. RATCHET_DEBUG=1 adds stack traces.
   Exit codes: 0 ok, 1 failure, 2 crypto failure.`;
 
@@ -764,10 +786,164 @@ function printReach(port, makeCommand) {
 // Shared rendering
 // ---------------------------------------------------------------------------
 
-function handshakeBanner() {
-  return ({ peerWords, sessionWords }) => {
+/** Dates in this tool are for a human placing an event, not for parsing. */
+function whenText(iso) {
+  if (!iso) return 'unknown';
+  const text = String(iso);
+  return text.length >= 10 ? text.slice(0, 10) : text;
+}
+
+/**
+ * Enough hex to name one peer in a command, not enough to mistake for the whole
+ * identity. 12 characters is 48 bits, which no accident collides with, and the
+ * full 32 are always one `ratchet peers --json` away.
+ */
+function shortHex(hex) {
+  return String(hex ?? '').slice(0, 12);
+}
+
+function verifyHint(hex) {
+  return `${cmd()} peers verify ${shortHex(hex)} --label NAME`;
+}
+
+/**
+ * The four states, on screen. Everything here is drawn from the 16 colour
+ * palette in cli/format.mjs and nothing here is wider than the banner it sits
+ * under, because this is the same block of output, not a new one.
+ */
+function renderTrust(verdict, peerWords) {
+  if (verdict.state === 'verified') {
+    const name = verdict.entry.label ?? shortHex(verdict.entry.hex);
+    say(
+      `  ${color.dim('trust        ')}  ${color.green('verified')} ${color.bold(name)}` +
+        `  ${color.dim(`confirmed ${whenText(verdict.entry.verifiedAt)}`)}`,
+    );
+    // Quiet on purpose. A verified key arriving from an address it has never
+    // used before is a laptop on a different network, which is a Tuesday. The
+    // key is what was verified and the key has not changed, so this is a note
+    // and never a warning. See classifyPeer in cli/peers.mjs.
+    if (verdict.newAddress) {
+      say(`  ${color.dim('             ')}  ${color.dim(`first time from ${verdict.address}, same key as always`)}`);
+    }
+    return;
+  }
+
+  if (verdict.state === 'changed') {
+    const was = verdict.conflict;
+    const wasName = was.label ?? shortHex(was.hex);
+    say('');
+    say(color.red(color.bold(`  !!  THE KEY AT ${verdict.address} IS NOT THE ONE YOU VERIFIED  !!`)));
+    say('');
+    say(`  ${color.dim(`verified ${whenText(was.verifiedAt)} as`)} ${color.bold(wasName)}`);
+    say(`    ${words(was.words || 'no words recorded')}  ${color.dim(shortHex(was.hex))}`);
+    say(`  ${color.dim('answering right now')}`);
+    say(`    ${words(peerWords)}  ${color.dim(shortHex(verdict.hex))}`);
+    say('');
+    say(color.red('  Anything already sent in this session went to the NEW key.'));
+    say(color.red('  Assume whoever holds that key has read it.'));
+    say('');
+    say(`  ${color.dim('From this side a reinstalled laptop and a machine in the middle look exactly')}`);
+    say(`  ${color.dim('the same. Only the other person can tell you which it is. Reach them some')}`);
+    say(`  ${color.dim(`other way, not through this connection, and ask them to run  ${cmd()} id`)}`);
+    say(`  ${color.dim('and read their six words to you.')}`);
+    say('');
+    say(`  ${color.dim('Then type one of these in full:')}`);
+    say(`    ${color.bold(verifyHint(verdict.hex))}`);
+    say(`      ${color.dim('the words matched, trust this new key from now on')}`);
+    say(`    ${color.bold(`${cmd()} peers forget ${shortHex(was.hex)}`)}`);
+    say(`      ${color.dim('drop the old record and decide later')}`);
+    say('');
+    return;
+  }
+
+  const lead = verdict.state === 'new' ? 'first time' : 'seen before, not verified';
+  say(`  ${color.dim('trust        ')}  ${lead}`);
+  say(`  ${color.dim('             ')}  ${color.dim('read the words above aloud with them. same words on both screens')}`);
+  say(`  ${color.dim('             ')}  ${color.dim('means nobody is in the middle. then, to remember it:')}`);
+  say(`  ${color.dim('             ')}  ${color.bold(verifyHint(verdict.hex))}`);
+}
+
+/**
+ * The trust store as the commands use it: load before the handshake, classify
+ * and print inside it, write after.
+ *
+ * That order is not incidental.
+ *
+ * Classification must run against the store as it was BEFORE this sighting, or
+ * the address gets filed under today's key and is then asked whether it
+ * conflicts with itself, which it never does. Recording first would disable the
+ * alarm completely, and it would look like it worked.
+ *
+ * The print must be synchronous, because onHandshake is fired and forgotten by
+ * the protocol layer. An async render would land its output somewhere in the
+ * middle of a progress bar, or after the transfer had already finished, which
+ * is far too late for a warning whose entire job is to give somebody the chance
+ * to press Ctrl+C.
+ *
+ * A store that will not load costs the trust check and says so out loud. It does
+ * not cost the transfer: the six words still print, which is exactly what this
+ * tool offered before the store existed. Degrading silently would be the
+ * unacceptable version, because a peers file that anyone can corrupt would then
+ * be a peers file that anyone can switch off.
+ */
+async function openTrust(address) {
+  let store = null;
+  let broken = null;
+  try {
+    store = await loadPeers();
+  } catch (err) {
+    broken = err;
+  }
+  let seen = null;
+
+  function stage() {
+    recordSighting(store, { hex: seen.hex, words: seen.words, address });
+  }
+
+  return {
+    /** Sync by contract. Called from inside onHandshake, where nothing awaits. */
+    observe({ peerHex, peerWords }) {
+      if (!peerHex) return;
+      if (broken) {
+        say(`  ${color.dim('trust        ')}  ${color.yellow('unavailable')} ${color.dim(broken.message)}`);
+        return;
+      }
+      const verdict = classifyPeer(store, { hex: peerHex, address });
+      seen = { hex: peerHex, words: peerWords };
+      renderTrust(verdict, peerWords);
+    },
+    /** Deferred until the work is done, so a write cannot delay the warning. */
+    async commit() {
+      if (!store || !seen) return;
+      try {
+        stage();
+        await savePeers(store);
+      } catch (err) {
+        say(color.yellow(`could not update ${peersFile()}: ${err.message}`));
+      }
+    },
+    /**
+     * The seam cli/chat.mjs calls for /verify. It records the sighting first,
+     * because during a live chat the commit has not happened yet and there may
+     * be no row to mark.
+     */
+    async verify(label) {
+      if (broken) throw broken;
+      if (!seen) throw new Error('no handshake has completed yet');
+      stage();
+      const entry = markVerified(store, { hex: seen.hex, label });
+      await savePeers(store);
+      const name = entry.label ?? shortHex(entry.hex);
+      return `${name} is now verified. ${peersFile()} remembers this key, not the conversation.`;
+    },
+  };
+}
+
+function handshakeBanner(trust) {
+  return ({ peerWords, sessionWords, peerHex }) => {
     say(`  ${color.dim('compare aloud')}  ${words(sessionWords)}`);
     say(`  ${color.dim('peer identity')}  ${words(peerWords)}`);
+    if (trust) trust.observe({ peerHex, peerWords });
   };
 }
 
@@ -931,6 +1107,11 @@ async function receiveOne({ channel, identity, outDir, opts }) {
   say('');
   say(`Connection from ${color.bold(channel.remote)}`);
 
+  // Loaded per connection, not per process. `recv` without `--once` can sit
+  // there for days, and a peers file edited in another terminal in the meantime
+  // should be the one that gets consulted.
+  const trust = await openTrust(addressOf(channel.remote));
+
   const received = await receivePayload({
     channel,
     identity,
@@ -938,9 +1119,10 @@ async function receiveOne({ channel, identity, outDir, opts }) {
     // Fires the moment the handshake lands, which is the whole reason it
     // exists: the words have to be on screen while the bytes are still moving,
     // not after, or there is nothing left to abort.
-    onHandshake: handshakeBanner(),
+    onHandshake: handshakeBanner(trust),
   });
   clearProgress();
+  await trust.commit();
 
   const written = await writeNoClobber(outDir, received.name, received.bytes);
   // Deliberately the sanitised name and never the raw one. The raw name came
@@ -1104,6 +1286,9 @@ async function cmdSend(opts, rest) {
   }
 
   const identity = await loadIdentity();
+  // The host as typed, without the port. The dialling side has no better handle
+  // on where it is calling, and the port here is the listener's, not the peer's.
+  const trust = await openTrust(host);
   say(`Connecting to ${color.bold(`${host}:${port}`)}`);
   const channel = await dial(host, port);
 
@@ -1115,9 +1300,10 @@ async function cmdSend(opts, rest) {
       bytes,
       chunkSize,
       onProgress: makeProgress('sending'),
-      onHandshake: handshakeBanner(),
+      onHandshake: handshakeBanner(trust),
     });
     clearProgress();
+    await trust.commit();
     renderResult({ verb: 'sent', name, stats, extra: `${host}:${port}`, showStats: Boolean(opts.stats) });
     if (jsonMode) emit({ direction: 'sent', name, to: `${host}:${port}`, ...stats });
     return 0;
@@ -1159,8 +1345,10 @@ async function cmdChat(opts, rest) {
 
   let channel;
   let server = null;
+  let address = null;
   if (opts.to) {
     const { host, port } = parseTo(opts.to);
+    address = host;
     say(`Connecting to ${color.bold(`${host}:${port}`)}`);
     channel = await dial(host, port);
   } else {
@@ -1181,9 +1369,12 @@ async function cmdChat(opts, rest) {
     // Chat is one conversation, so stop accepting the moment one arrives.
     await closeQuietly(server);
     if (!channel) return 1;
+    address = addressOf(channel.remote);
     say('');
     say(`Connected to ${color.bold(channel.remote)}`);
   }
+
+  const trust = await openTrust(address);
 
   try {
     const result = await runChat({
@@ -1191,12 +1382,19 @@ async function cmdChat(opts, rest) {
       identity,
       stdin: process.stdin,
       stdout: out,
-      onHandshake: handshakeBanner(),
+      onHandshake: handshakeBanner(trust),
+      // The seam for /verify. runChat owns the question and the answer, this
+      // owns the disk, and neither has to know how the other works.
+      onVerify: ({ label }) => trust.verify(label),
     });
+    await trust.commit();
     const sent = result && Number.isFinite(result.sent) ? result.sent : 0;
     const received = result && Number.isFinite(result.received) ? result.received : 0;
     say('');
-    say(`${color.green('chat over')}  sent ${sent}, received ${received}. Nothing was written to disk.`);
+    say(
+      `${color.green('chat over')}  sent ${sent}, received ${received}. ` +
+        'No message was written to disk.',
+    );
     if (jsonMode) emit({ direction: 'chat', sent, received });
     return 0;
   } finally {
@@ -1231,6 +1429,157 @@ async function cmdId(opts) {
   say(box('ratchet id', [`words     ${words(myWords)}`, `identity  ${color.dim(identityFile())}`]));
   if (jsonMode) emit({ words: myWords, hex: print.hex, identityFile: identityFile() });
   return 0;
+}
+
+/**
+ * One line typed in full, read from the terminal.
+ *
+ * The prompt goes to stderr so that `--json` keeps a clean stdout, and the
+ * answer is compared against the whole word. Nothing here accepts a bare `y`,
+ * and nothing here treats an empty line as agreement, because the question is
+ * "did you compare six words with a human" and only the human knows.
+ */
+async function askLine(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await new Promise((resolve) => rl.question(question, resolve));
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Resolve a label or hex prefix to exactly one peer, or explain why it did not.
+ *
+ * Ambiguity is an error rather than a guess. These commands change who this
+ * machine trusts, and picking the first of two matches is how the wrong row
+ * gets marked verified.
+ */
+function onePeer(store, query) {
+  const matches = findPeers(store, query);
+  if (matches.length === 0) {
+    failWith(
+      `no peer matches ${query}`,
+      `See what is known:  ${color.bold(`${cmd()} peers`)}`,
+    );
+  }
+  if (matches.length > 1) {
+    failWith(
+      `${query} matches ${matches.length} peers`,
+      'Use more of the hex, which is unique:',
+      ...matches.map((p) => `  ${color.bold(shortHex(p.hex))}  ${p.label ?? color.dim('no label')}`),
+    );
+  }
+  return matches[0];
+}
+
+function peersList(store) {
+  const all = listPeers(store);
+  if (jsonMode) {
+    emit({ peersFile: peersFile(), peers: all });
+    if (all.length === 0) return 0;
+  }
+  say(box('ratchet peers', [`known   ${color.bold(String(all.length))}`, `file    ${color.dim(peersFile())}`]));
+  if (all.length === 0) {
+    say('');
+    say(color.dim('Nobody yet. This fills in the first time a send, recv or chat completes.'));
+    return 0;
+  }
+  say('');
+  for (const peer of all) {
+    const mark = peer.verified ? color.green('verified  ') : color.dim('unverified');
+    const name = peer.label ? color.bold(peer.label) : color.dim('no label');
+    say(`  ${mark}  ${color.bold(shortHex(peer.hex))}  ${name}`);
+    say(`              ${words(peer.words || color.dim('no words recorded'))}`);
+    const seenAt = peer.addresses.length > 0 ? peer.addresses.join(', ') : 'nowhere recorded';
+    say(`              ${color.dim(`last seen ${whenText(peer.lastSeen)} from ${seenAt}`)}`);
+    say('');
+  }
+  say(color.dim(`Verify one:  ${color.bold(`${cmd()} peers verify HEX --label NAME`)}`));
+  say(color.dim(`Drop one:    ${color.bold(`${cmd()} peers forget HEX`)}`));
+  return 0;
+}
+
+async function cmdPeers(opts, rest) {
+  const [sub, ...args] = rest;
+  let store;
+  try {
+    store = await loadPeers();
+  } catch (err) {
+    failWith(
+      err.message,
+      'Nothing else is affected: this file only remembers who you have talked to.',
+      `Move it aside and this rebuilds itself:  ${color.bold(`mv ${peersFile()} ${peersFile()}.broken`)}`,
+    );
+  }
+
+  if (sub === undefined || sub === 'list') {
+    if (args.length > 0) usageError(`peers list takes no arguments, got ${args[0]}`);
+    return peersList(store);
+  }
+
+  if (sub === 'forget') {
+    const query = args.join(' ').trim();
+    if (!query) {
+      usageError(
+        'peers forget needs a label or a hex prefix',
+        `See what is known:  ${color.bold(`${cmd()} peers`)}`,
+      );
+    }
+    // The query is joined rather than taken as args[0], so a label with a space
+    // in it needs no quoting.
+    const peer = onePeer(store, query);
+    forgetPeer(store, peer.hex);
+    await savePeers(store);
+    const name = peer.label ?? shortHex(peer.hex);
+    say(`${color.yellow('forgotten')} ${color.bold(name)} ${color.dim(shortHex(peer.hex))}`);
+    say(color.dim('The next connection from that key is a first meeting again, with no warning.'));
+    if (jsonMode) emit({ forgot: peer.hex, label: peer.label ?? null });
+    return 0;
+  }
+
+  if (sub === 'verify') {
+    const query = args.join(' ').trim();
+    if (!query) {
+      usageError(
+        'peers verify needs a label or a hex prefix',
+        `The banner after a handshake prints the exact line to paste.`,
+        `Or list them:  ${color.bold(`${cmd()} peers`)}`,
+      );
+    }
+    const peer = onePeer(store, query);
+    const label = typeof opts.label === 'string' ? opts.label.trim() : '';
+
+    // The whole point of the six words is that a person said them out loud to
+    // another person. Nothing on this machine can check that, so the only
+    // honest implementation is to ask, and to take one answer.
+    say('');
+    say(`  ${color.bold(shortHex(peer.hex))}  ${words(peer.words || 'no words recorded')}`);
+    say('');
+    say(color.dim('  Have you read those six words aloud with that person, on a call or in the'));
+    say(color.dim('  same room, and did they read back the same ones?'));
+    say('');
+    const answer = (await askLine('  Type yes to record that, anything else cancels: ')).trim();
+    if (answer !== 'yes') {
+      say(`${color.dim('not verified.')} Nothing was changed.`);
+      if (jsonMode) emit({ verified: false, hex: peer.hex });
+      return 1;
+    }
+
+    const entry = markVerified(store, { hex: peer.hex, label: label || peer.label });
+    await savePeers(store);
+    const name = entry.label ?? shortHex(entry.hex);
+    say(`${color.green('verified')} ${color.bold(name)} ${color.dim(shortHex(entry.hex))}`);
+    say(color.dim('A different key at that address will now be called out, loudly.'));
+    if (jsonMode) emit({ verified: true, hex: entry.hex, label: entry.label });
+    return 0;
+  }
+
+  usageError(
+    `unknown peers command ${sub}`,
+    `There are three:  ${color.bold('list')}, ${color.bold('verify')}, ${color.bold('forget')}.`,
+  );
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,10 +1640,13 @@ async function main() {
     case 'id':
       if (rest.length > 0) usageError(`id takes no arguments, got ${rest[0]}`);
       return cmdId(opts);
+    case 'peers':
+      return cmdPeers(opts, rest);
     default:
       usageError(
         `unknown command ${command}`,
-        `There are four:  ${color.bold('recv')}, ${color.bold('send')}, ${color.bold('chat')}, ${color.bold('id')}.`,
+        `There are five:  ${color.bold('recv')}, ${color.bold('send')}, ${color.bold('chat')}, ` +
+          `${color.bold('id')}, ${color.bold('peers')}.`,
         `Run  ${color.bold(`${cmd()} --help`)}`,
       );
       return 1;

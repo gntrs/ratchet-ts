@@ -1,9 +1,10 @@
-import { x25519 } from '@noble/curves/ed25519.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 
 import type { EnvelopeBytes, MessagePayload, SessionState } from './contract.js';
 import { openAeadSync, sealAeadSync } from './aead.js';
 import { bytesToUtf8, equal, toBase64Url, utf8ToBytes, wipe } from './bytes.js';
+import { x25519Keygen, x25519SharedSecret } from './curves.js';
+import type { EncodeEnvelopeBytesOptions } from './envelope.js';
 import { decodeEnvelopeBytes, encodeEnvelopeBytes, messageAad } from './envelope.js';
 import { fail } from './errors.js';
 import { X25519_PUBLIC_LEN } from './identity.js';
@@ -114,14 +115,14 @@ function dhRatchet(draft: Draft, payload: MessagePayload): void {
   draft.recvCount = 0;
   draft.peerRatchetPublic = payload.ratchetPublic;
 
-  const recvDh = x25519.getSharedSecret(draft.selfRatchetSecret, payload.ratchetPublic);
+  const recvDh = x25519SharedSecret(draft.selfRatchetSecret, payload.ratchetPublic);
   const recvStep = kdfRoot(draft.rootKey, recvDh);
   wipe(recvDh);
   draft.rootKey = recvStep.rootKey;
   draft.recvChainKey = recvStep.chainKey;
 
-  const fresh = x25519.keygen();
-  const sendDh = x25519.getSharedSecret(fresh.secretKey, payload.ratchetPublic);
+  const fresh = x25519Keygen();
+  const sendDh = x25519SharedSecret(fresh.secretKey, payload.ratchetPublic);
   const sendStep = kdfRoot(draft.rootKey, sendDh);
   wipe(sendDh);
   draft.rootKey = sendStep.rootKey;
@@ -307,13 +308,20 @@ export function ratchetDecrypt(session: SessionState, payload: MessagePayload): 
  * direction, for nothing.
  *
  * The plaintext buffer belongs to the caller and is neither modified nor wiped.
+ *
+ * `options.reserve` leaves that many zero bytes in front of the envelope inside
+ * the SAME allocation, so a transport that prefixes a length can stamp it in
+ * place instead of concatenating. It changes nothing about the envelope: the
+ * bytes from index `reserve` onward are what a caller with no reserve would
+ * have received, which is what makes this safe to use on a live wire.
  */
 export function ratchetEncryptToEnvelopeBytes(
   session: SessionState,
   plaintext: Uint8Array,
+  options?: EncodeEnvelopeBytesOptions,
 ): { envelope: EnvelopeBytes; session: SessionState } {
   const sealed = ratchetEncryptBytes(session, plaintext);
-  return { envelope: encodeEnvelopeBytes(sealed.payload), session: sealed.session };
+  return { envelope: encodeEnvelopeBytes(sealed.payload, options), session: sealed.session };
 }
 
 /**
@@ -339,7 +347,17 @@ export function ratchetDecryptFromEnvelopeBytes(
   session: SessionState,
   envelope: EnvelopeBytes,
 ): { plaintext: Uint8Array; session: SessionState } {
-  const payload = decodeEnvelopeBytes(envelope);
+  // borrowCiphertext, and this is the one call site in the package that earns
+  // it. The decoded payload is local to this function and never escapes it, and
+  // the only thing done with `payload.ciphertext` downstream is the single
+  // `openAeadSync` call inside `open()`. Both AEAD backends allocate their own
+  // output rather than handing back a view of their input, so the plaintext
+  // returned from here does not alias `envelope` either. Nothing else reads the
+  // field: `messageAad` binds the header and not the ciphertext, and the two
+  // fields that do get stored in session state, `ratchetPublic` and `nonce`,
+  // are still copied by the decoder. So the caller is free to reuse `envelope`
+  // the moment this returns, which is what a socket reader will do.
+  const payload = decodeEnvelopeBytes(envelope, { borrowCiphertext: true });
   if (payload.kind !== 'message') {
     fail('malformed_token', `expected a message envelope, got ${payload.kind}`);
   }

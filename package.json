@@ -1,6 +1,6 @@
 {
   "name": "ratchet-ts",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. Forward secrecy, post-compromise security, and post-quantum handshake. MIT.",
   "license": "MIT",
   "author": {

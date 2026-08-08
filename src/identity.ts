@@ -1,9 +1,9 @@
-import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import type { Fingerprint, IdentityKeyPair, PublicIdentity } from './contract.js';
 import { concat, equal, toHex, utf8ToBytes } from './bytes.js';
+import { x25519Keygen } from './curves.js';
 import { FINGERPRINT_WORDS, WORDLIST, WORDLIST_BITS } from './wordlist.js';
 
 export const X25519_PUBLIC_LEN = 32;
@@ -15,7 +15,7 @@ export const MLKEM768_CIPHERTEXT_LEN = 1088;
 const FINGERPRINT_DOMAIN = utf8ToBytes('OCX1 identity fingerprint v1');
 
 export function createIdentity(): IdentityKeyPair {
-  const classical = x25519.keygen();
+  const classical = x25519Keygen();
   const pq = ml_kem768.keygen();
   return {
     classicalPublic: classical.publicKey,

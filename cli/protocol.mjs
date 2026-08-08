@@ -47,17 +47,23 @@
  *                           each at most `chunkSize` plaintext bytes.
  *
  *      Pipelined, not lockstep. The sender never waits for a per chunk
- *      acknowledgement, only for the socket to drain, so a high latency link
- *      costs one round trip for the whole transfer instead of one per chunk.
+ *      acknowledgement, so a high latency link costs one round trip for the
+ *      whole transfer instead of one per chunk. It waits only when the socket
+ *      is holding more than one write window of unflushed bytes, which is the
+ *      memory bound and lives in cli/frame.mjs. Between those waits it is
+ *      sealing chunk i + 1 while the socket is still moving chunk i.
  *
- *   6. RECEIVER             opens header, opens each chunk, appends, then
- *                           recomputes sha256 over the assembled bytes and
- *                           compares against the header. Mismatch throws.
+ *   6. RECEIVER             opens header, opens each chunk, writes it into the
+ *                           assembled buffer and hashes the region it just
+ *                           wrote. At the end it compares the running sha256
+ *                           against the header. Mismatch throws.
  *
  *      Belt and braces over the AEAD. Each chunk authenticates only itself, so
  *      Poly1305 cannot see an assembly bug: a chunk written at the wrong offset
  *      or a dropped tail passes every tag check and still produces the wrong
- *      file. The whole-payload hash is what catches that.
+ *      file. The payload hash is what catches that, which is why the digest is
+ *      fed from the assembled buffer and never from the chunk plaintext: a
+ *      digest of the chunks would agree with itself wherever they landed.
  *
  *   7. RECEIVER -> SENDER   sealed `{ ok: true, sha256 }`
  *
@@ -88,6 +94,17 @@
  *                sounded: see the frame seam note further down for what was
  *                hidden and what deleted it.
  *   wallMs       first payload frame to final acknowledgement.
+ *
+ *                Unchanged as a definition in 0.3.3, and worth saying plainly
+ *                because the number moved: the window is the same span on both
+ *                sides, what changed is that the receiver no longer spends the
+ *                end of it hashing 10 MB in one go. The sender computes its
+ *                digest before the window opens, because the header carries it,
+ *                so a whole-payload pass on the receiving side was charging one
+ *                side for work the other did off the clock. The receiver now
+ *                hashes each chunk as it lands, inside the window, overlapped
+ *                with the socket. Same window, same work counted, the receiver
+ *                stops paying a serial tail the sender never paid.
  *
  * cryptoMs and wallMs cover different windows, so on a fast payload path
  * cryptoMs can be the larger of the two and that is not a bug. cryptoMs starts
@@ -222,8 +239,16 @@ function compareBytes(a, b) {
  * Same digest construction as the library, same wordlist, so it is exactly as
  * strong as an ordinary fingerprint: 66 bits, enough against an automated key
  * swap, not enough against someone grinding keypairs at a named target.
+ *
+ * THIS IS THE ONLY COPY. cli/chat.mjs used to carry a second one, kept in step
+ * by a comment asking whoever edited either to edit both. Two independent
+ * copies of a security relevant derivation is a bug with a date on it: the day
+ * they drift, a user comparing a chat session against a file transfer sees two
+ * different word sets for one pair of identities and concludes, wrongly, that
+ * something is wrong. test/peers.test.mjs pins the output against fixed
+ * identity bytes so a change here has to be deliberate.
  */
-function pairWords(self, peer) {
+export function pairWords(self, peer) {
   const mine = publicOf(self);
   const [first, second] = compareBytes(mine.classicalPublic, peer.classicalPublic) <= 0
     ? [mine, peer]
@@ -238,27 +263,87 @@ function pairWords(self, peer) {
 
 /**
  * A raw reason string is useless to someone staring at a terminal. Translate
- * into what it means for a file transfer, which is a different sentence for
- * each reason: a replay is suspicious, a missing session is a protocol bug, a
- * failed tag is either corruption or an attacker.
+ * into what it means, which is a different sentence for each reason: a replay
+ * is suspicious, a missing session is a protocol bug, a failed tag is either
+ * corruption or an attacker.
+ *
+ * ONE table, two columns, not two tables. A file transfer and a chat session
+ * are not the same situation, and exactly two of these read wrong in the other
+ * one: "the transfer cannot continue" is not what happened to a conversation,
+ * and "nothing was written" is a strange thing to reassure someone about in a
+ * chat that never writes anything. Every other row says the same thing in both
+ * places, so `chat` is an override on the row and never a second copy of it.
+ * The duplication this replaces is the reason for the rule: cli/chat.mjs used
+ * to fall back to the raw library message, so `ratchet send` printed a
+ * sentence and `ratchet chat` printed `replay_detected` and nothing else.
+ *
+ * Every value of the CryptoFailureReason union in src/types.ts has a row here.
+ * test/peers.test.mjs reads that union out of the source and fails if a new
+ * reason is added upstream without wording in every context.
  */
 const REASONS = {
-  malformed_token: 'the peer sent something that is not a ratchet-ts envelope, so the other end is not speaking this protocol',
-  unknown_version: 'the peer is running an incompatible ratchet-ts version, so upgrade one side',
-  no_session: 'no live session for that frame, so the two sides fell out of step in the handshake',
-  authentication_failed: 'the data was tampered with in transit, or the peer is not who it claims to be. Nothing was written',
-  replay_detected: 'the same frame arrived twice, which is either a broken relay or a deliberate replay',
-  skip_limit_exceeded: 'too many frames went missing for the ratchet to catch up, so the transfer cannot continue',
-  identity_mismatch: 'the reply answers an invite from a different identity, so something re-addressed the handshake',
+  malformed_token: {
+    transfer: 'the peer sent something that is not a ratchet-ts envelope, so the other end is not speaking this protocol',
+  },
+  unknown_version: {
+    transfer: 'the peer is running an incompatible ratchet-ts version, so upgrade one side',
+  },
+  no_session: {
+    transfer: 'no live session for that frame, so the two sides fell out of step in the handshake',
+  },
+  authentication_failed: {
+    transfer: 'the data was tampered with in transit, or the peer is not who it claims to be. Nothing was written',
+    chat: 'that frame was tampered with in transit, or the peer is not who it claims to be. Nothing was shown',
+  },
+  replay_detected: {
+    transfer: 'the same frame arrived twice, which is either a broken relay or a deliberate replay',
+  },
+  skip_limit_exceeded: {
+    transfer: 'too many frames went missing for the ratchet to catch up, so the transfer cannot continue',
+    chat: 'too many frames went missing for the ratchet to catch up, so the conversation cannot continue',
+  },
+  identity_mismatch: {
+    transfer: 'the reply answers an invite from a different identity, so something re-addressed the handshake',
+  },
 };
 
-function wrapCrypto(err, during) {
+/** Every context REASONS is written for, so a test can walk all of them. */
+export const FAILURE_CONTEXTS = ['transfer', 'chat'];
+
+/**
+ * The sentence for one reason in one context, or null when this build has no
+ * wording for it. Null rather than a stand-in sentence: the caller falls back
+ * to the library's own message, which is worse but true, and a stand-in would
+ * be neither.
+ */
+export function explainFailure(reason, context = 'transfer') {
+  const row = REASONS[reason];
+  if (!row) return null;
+  return row[context] ?? row.transfer;
+}
+
+/**
+ * The reason code stays in the text on purpose. It is the one part of this
+ * sentence somebody can paste into an issue and search for, and an error you
+ * cannot search for is a failure of its own.
+ */
+export function wrapCrypto(err, during, context = 'transfer') {
   if (!isCryptoFailure(err)) return err;
-  const explained = REASONS[err.reason] ?? err.message;
+  const explained = explainFailure(err.reason, context) ?? err.message;
   const wrapped = new Error(`${during}: ${explained} (${err.reason})`);
   wrapped.cause = err;
   wrapped.reason = err.reason;
   return wrapped;
+}
+
+/**
+ * The same translation as a plain string, for callers that print rather than
+ * throw. Anything that is not a crypto failure passes through carrying its own
+ * message, so one call site handles both without having to ask which it holds.
+ */
+export function explainError(err, during, context = 'transfer') {
+  if (isCryptoFailure(err)) return wrapCrypto(err, during, context).message;
+  return `${during}: ${err && err.message ? err.message : String(err)}`;
 }
 
 /**
@@ -396,16 +481,16 @@ function handshakeFrame(token, what) {
  * Both branches are timed in full, conversion included. There is no longer a
  * step in the sealing of a payload frame that cryptoMs does not see.
  */
-async function sealFrame(clock, session, plaintext, what) {
+async function sealFrame(clock, session, plaintext, what, { reserve = 0 } = {}) {
   if (typeof plaintext !== 'string') {
     const sealed = await timed(clock, `sealing ${what}`, () =>
-      engine.sealToEnvelopeBytes(session, plaintext),
+      engine.sealToEnvelopeBytes(session, plaintext, reserve > 0 ? { reserve } : undefined),
     );
-    return { frame: sealed.envelope, session: sealed.session };
+    return { frame: sealed.envelope, session: sealed.session, reserved: reserve };
   }
   return timed(clock, `sealing ${what}`, async () => {
     const sealed = await engine.seal(session, plaintext);
-    return { frame: toWire(sealed.token, what), session: sealed.session };
+    return { frame: toWire(sealed.token, what), session: sealed.session, reserved: 0 };
   });
 }
 
@@ -449,9 +534,17 @@ async function openChunkFrame(clock, session, frame, what) {
   return timed(clock, `opening ${what}`, () => engine.openFromEnvelopeBytes(session, frame));
 }
 
-/** Real cost of putting one frame on the socket, prefix included. */
-function wireCost(frame) {
-  return FRAME_PREFIX_BYTES + frame.length;
+/**
+ * Real cost of putting one frame on the socket, prefix included.
+ *
+ * `reserved` is how many of those prefix bytes are already sitting inside
+ * `frame`, which is nonzero exactly when the frame was sealed with room left in
+ * front for the length. Counting the prefix twice there would have inflated
+ * every reported overhead figure the moment the no-copy path switched on, and
+ * the whole point of that path is that it changes nothing on the wire.
+ */
+function wireCost(frame, reserved = 0) {
+  return FRAME_PREFIX_BYTES - reserved + frame.length;
 }
 
 /**
@@ -488,10 +581,17 @@ async function expectFrame(channel, what) {
  * Optional and additive: the pinned signatures and the Stats shape are
  * untouched, a caller that does not pass it sees no difference.
  */
-function announce(onHandshake, peerWords, sessionWords, handshakeMs) {
+/**
+ * `peerHex` is the first 128 bits of the peer identity digest, the same string
+ * `ratchet id --json` prints, and it is what cli/peers.mjs keys its trust store
+ * on. The words are a 66 bit projection of that same digest and are for humans
+ * only: two different identities colliding in six words is a thing an attacker
+ * can work towards, and colliding in the hex is not.
+ */
+function announce(onHandshake, peerWords, sessionWords, handshakeMs, peerHex) {
   if (typeof onHandshake !== 'function') return;
   try {
-    void onHandshake({ peerWords, sessionWords, handshakeMs });
+    void onHandshake({ peerWords, sessionWords, handshakeMs, peerHex });
   } catch {
     /* a broken banner must never fail a transfer */
   }
@@ -565,9 +665,10 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
   }
 
   const handshakeMs = performance.now() - handshakeStart;
-  const peerWords = formatFingerprint(fingerprint(session.peer));
+  const peerPrint = fingerprint(session.peer);
+  const peerWords = formatFingerprint(peerPrint);
   const sessionWords = pairWords(identity, session.peer);
-  announce(onHandshake, peerWords, sessionWords, handshakeMs);
+  announce(onHandshake, peerWords, sessionWords, handshakeMs, peerPrint.hex);
 
   const sha256 = sha256Hex(payload);
   const header = JSON.stringify({
@@ -592,18 +693,59 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
 
   report(onProgress, 0, size);
   let done = 0;
+  // The backpressure promise for the frame that was handed to the socket last
+  // iteration, held rather than awaited, which is what makes the overlap below
+  // real. See the comment on the await.
+  let inflight = null;
+  // How much room the transport wants in front of a frame for its own length
+  // prefix. Asking the channel rather than assuming four keeps this file
+  // ignorant of the framing, which is the reason the channel is injected at
+  // all: a transport that needs no prefix answers 0 and the seal below is
+  // byte for byte what it was before. Leaving the room during the seal is what
+  // removes the last full-size copy of every chunk, since the prefix is then
+  // stamped into the envelope's own allocation instead of a fresh buffer.
+  const reserve = Number.isInteger(channel.prefixBytes) ? channel.prefixBytes : 0;
   for (let i = 0; i < chunks; i += 1) {
     const start = i * chunk;
     const slice = payload.subarray(start, Math.min(start + chunk, size));
-    const sealed = await sealFrame(clock, session, slice, `chunk ${i + 1} of ${chunks}`);
+    const sealed = await sealFrame(clock, session, slice, `chunk ${i + 1} of ${chunks}`, {
+      reserve,
+    });
     session = sealed.session;
-    wireBytes += wireCost(sealed.frame);
-    // Awaited for backpressure only, not for a reply. The receiver is opening
-    // chunk i while this loop is sealing chunk i + 1, which is the pipelining.
-    await channel.send(sealed.frame);
+    wireBytes += wireCost(sealed.frame, sealed.reserved);
+    // THE PIPELINING, and it is a claim about the order of these three lines.
+    //
+    // channel.send hands the frame to the socket synchronously and returns a
+    // promise for "the socket is back under its write window". So chunk i - 1
+    // was submitted before the seal above ran, and the kernel was moving it
+    // while this iteration was doing that CPU work. Sealing chunk i + 1 then
+    // overlaps chunk i the same way. Nothing here is parallel: the ratchet is
+    // strictly ordered, chunks are sealed in sequence and submitted in
+    // sequence, and the only thing overlapping is our CPU with the socket's
+    // I/O.
+    //
+    // Awaiting the PREVIOUS send here rather than this one is the whole trick.
+    // It is still backpressure, never a reply: awaiting bounds how far ahead of
+    // the socket this loop may run, at one write window plus the single frame
+    // submitted below. Before 0.3.3 this awaited its own send, and since a
+    // sealed 64 KiB chunk is four times Node's default watermark, that meant
+    // waiting for the kernel to take every single frame before starting the
+    // next seal. The overlap this comment described did not exist.
+    if (inflight) await inflight;
+    inflight = channel.send(sealed.frame, { prefixReserved: sealed.reserved > 0 });
+    // A rejection sitting on an unawaited promise takes the process down with
+    // an unhandled rejection if the seal on the next iteration throws first.
+    // The await above is what reports the error; this only marks it as seen.
+    if (typeof inflight?.catch === 'function') inflight.catch(() => {});
+    // Bytes submitted, which is what this counter has always meant. It was
+    // never an acknowledgement from the peer, and it is now up to one write
+    // window ahead of the wire rather than up to one frame ahead.
     done += slice.length;
     report(onProgress, done, size);
   }
+  // The loop only ever waits for the second to last frame, so the last one
+  // still has to clear before the acknowledgement can be waited on.
+  if (inflight) await inflight;
 
   const ackFrame = await expectFrame(channel, 'the receiver acknowledgement');
   const ack = await openFrame(
@@ -682,9 +824,10 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   await channel.send(ready.frame);
 
   const handshakeMs = performance.now() - handshakeStart;
-  const peerWords = formatFingerprint(fingerprint(session.peer));
+  const peerPrint = fingerprint(session.peer);
+  const peerWords = formatFingerprint(peerPrint);
   const sessionWords = pairWords(identity, session.peer);
-  announce(onHandshake, peerWords, sessionWords, handshakeMs);
+  announce(onHandshake, peerWords, sessionWords, handshakeMs, peerPrint.hex);
 
   // Starts before the await, so it includes the sender's turnaround. That is
   // the same span the sender measures, give or take one network hop.
@@ -727,6 +870,31 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   const assembled = new Uint8Array(header.size);
   report(onProgress, 0, header.size);
   let done = 0;
+  // Hashed a chunk at a time instead of in one pass over the finished payload.
+  //
+  // Two reasons, and the accounting one is the smaller of them. The real one is
+  // that a single pass at the end is dead time on the critical path: the last
+  // chunk has landed, the sender is blocked waiting for the acknowledgement,
+  // and this side spends ~15 ms per 10 MB hashing before it can send one. Fed a
+  // chunk at a time, the same work happens while the socket is delivering the
+  // next frame, which is time this side was going to spend waiting anyway.
+  //
+  // The accounting one: the sender hashes OUTSIDE its wallMs window, because it
+  // needs the digest to build the header before the window opens. So a whole
+  // payload pass here charged the receiver for work the sender did off the
+  // clock, and the receiver looked slower than it was by exactly that much. It
+  // could not be fixed by moving the hash out of the window on this side, since
+  // the acknowledgement genuinely cannot go out until the hash is known, and
+  // wallMs ends at the acknowledgement. Overlapping it is the honest fix.
+  //
+  // This still reads back out of `assembled` rather than hashing the plaintext
+  // it was handed, which is what keeps step 6's promise intact. The whole point
+  // of the payload hash is that the AEAD cannot see an assembly bug, and a
+  // digest fed from the chunks directly would be just as blind: it would agree
+  // with itself no matter where the bytes were written. Hashing the region of
+  // the assembled buffer we just wrote catches a chunk placed at the wrong
+  // offset, and the `done !== header.size` check below catches a dropped tail.
+  const digest = createHash('sha256');
   for (let i = 0; i < chunks; i += 1) {
     const frame = await expectFrame(channel, `chunk ${i + 1} of ${chunks}`);
     wireBytes += wireCost(frame);
@@ -736,7 +904,9 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
       throw new Error(`chunk ${i + 1} overruns the declared size of ${header.size} bytes`);
     }
     assembled.set(chunk.plaintext, done);
+    const placed = done;
     done += chunk.plaintext.length;
+    digest.update(assembled.subarray(placed, done));
     report(onProgress, done, header.size);
   }
 
@@ -744,7 +914,7 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
     throw new Error(`assembled ${done} bytes but the header declared ${header.size}`);
   }
 
-  const sha256 = sha256Hex(assembled);
+  const sha256 = digest.digest('hex');
   if (sha256 !== header.sha256) {
     // Every chunk passed its own AEAD tag, so this is an assembly fault rather
     // than tampering. Say so, otherwise the user hunts for an attacker.

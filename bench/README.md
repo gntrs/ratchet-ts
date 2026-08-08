@@ -23,6 +23,88 @@ step.
 
 ---
 
+## The 0.3.2 correction: the numbers below were measuring a dead path
+
+Read this before anything else in this file, including the parts that used to
+be the confident parts.
+
+**Every throughput number published in this document before 0.3.2 was measured
+against a code path `cli/protocol.mjs` stopped using in 0.3.1.** The correction
+is roughly a factor of ten. The old numbers are still here, marked, because
+deleting them would hide the mistake rather than fix it.
+
+What happened. `bench/wire.mjs` did not call the CLI. It carried its own copy of
+the CLI's frame sequence, and a comment at the top of section 1 said so and
+called it a deliberate choice: the copy meant the benchmark kept running while
+`cli/protocol.mjs` was mid refactor. Then 0.3.1 moved the CLI's payload path off
+`engine.sealBytes` and `engine.openBytes` and onto
+`engine.sealToEnvelopeBytes` and `engine.openFromEnvelopeBytes`. The copy never
+got the change. For two releases the benchmark base64url encoded a 65535 byte
+ciphertext into an 87532 character token and parsed it straight back out, per
+frame, at both ends, and reported the result as the library's throughput. The
+tell was in plain sight and nobody looked at it: the copy declared
+`PROTOCOL_VERSION = 1` while `cli/protocol.mjs` had been on `2` since the binary
+frame format landed.
+
+How big the error was, isolated. Both paths driven over the same sockets, in the
+same process, against one unchanged build, so nothing else can be moving:
+
+| payload | token path, what the bench measured | bytes path, what the CLI ran | correction |
+|---|---|---|---|
+| 1.0 MB | 4.49 MB/s | 23.86 MB/s | 5.3x |
+| 10.5 MB | 4.37 MB/s | 47.74 MB/s | 10.9x |
+
+The library did not get faster. The benchmark stopped charging it for work it
+does not do.
+
+### Two effects, held apart
+
+Independently of the above, `src` got faster in the same window: a native
+`node:crypto` X25519 backend, a base64url fast path in `src/bytes.ts`, and two
+allocation removals in the decode path. Those are real and they are somebody
+else's result, so this file does not fold them into the correction. Same
+isolation harness, all four cells, 10.5 MB payload, medians of five:
+
+| | token path | bytes path |
+|---|---|---|
+| src at the 0.3.2 tag | 4.37 MB/s | 47.74 MB/s |
+| src with those changes | 31.13 MB/s | 74.24 MB/s |
+
+Read it column by column, not diagonally. **The benchmark fix is the row move:
+4.37 to 47.74, about eleven times.** The `src` work is the column move on the
+path that actually ships: 47.74 to 74.24, about 1.6 times. The diagonal, 4.37 to
+74.24, is about seventeen times and it is the number to never quote, because it
+credits one change with the other's win. That mistake is the same shape as the
+one this correction exists to undo.
+
+The `src` work also flatters the token path far more than the real one, 4.37 to
+31.13, because a base64url fast path mostly speeds up base64url. Another reason
+the old measurement was worse than useless: it was sensitive to work the product
+does not perform.
+
+### What changed in the script
+
+- It calls `sendPayload` and `receivePayload` from `cli/protocol.mjs` instead of
+  copying them. There is no second implementation left to drift.
+- `PROTOCOL_VERSION` and `DEFAULT_CHUNK_BYTES` are imported, not restated.
+- A new section 0 prints the guards before any number: the frame sequence and
+  kinds the CLI produced, three independent counts of the same wire bytes
+  agreeing, and the two seal paths interoperating. If section 0 says FAIL, no
+  table under it is worth reading.
+- The `transcode ms` column is gone rather than left reading zero. See below.
+
+### What is still stale in this document
+
+The **Measured output** section further down was captured before all of this.
+Its section 5 table in particular was taken before the base64url fast path
+landed, so its token codec figures are several times too slow to describe the
+current build, and its `sender crypto` figure of 21.28 ms is the old copy's
+clock, which included base64 the CLI was not doing. It is left in place as a
+record of what was published. Re-run the script for current numbers; do not
+quote that block.
+
+---
+
 ## The one thing to read first
 
 **Only the crypto columns say anything about this library.**
@@ -92,16 +174,44 @@ it does not, the script says so at the top and derives the number from the
 base64 length instead. Derived is exact arithmetic, but it is arithmetic, and
 the output labels it.
 
+### The `transcode ms` column is gone
+
+It used to sit between `receiver crypto ms` and `wall ms`, and this document
+used to explain it as an unavoidable artefact: `engine.seal` returns a token
+string, so putting the binary form on the wire meant converting at both ends,
+and the conversion got its own clock so it could never be folded into
+`crypto ms`.
+
+That explanation described the harness, not the product. The only reason the
+harness converted was that its copy of the CLI called `engine.sealBytes` and
+`engine.openBytes`. The real `cli/protocol.mjs` has called
+`engine.sealToEnvelopeBytes` and `engine.openFromEnvelopeBytes` on the payload
+path since 0.3.1 and converts nothing there. The column has been deleted rather
+than left reading zero, because a zero would suggest a cost that got optimised
+away, and there was never a cost in the shipping code to optimise.
+
+Five small frames per transfer do still convert, and that is by design rather
+than by omission: the invite and the accept never come out of a seal, and the
+ready frame, the header and the acknowledgement are strings that stay on
+`engine.seal` so it keeps ownership of the transient UTF-8 copy it wipes. Those
+five are inside the CLI's own `cryptoMs`, which is the number the crypto columns
+now print. Section 5 sizes what the twelve chunk frames used to pay.
+
 ### What section 1 does not mean
 
-- It does not prove `cli/protocol.mjs` is correct. The script reimplements that
-  module's frame sequence rather than calling it, so the bench keeps running
-  while the CLI is mid refactor. A divergence introduced there will not show up
-  here. The test suite is what checks the CLI.
-- The `transcode ms` column is an artefact of this harness. `engine.seal`
-  returns a token string, so putting the binary form on the wire means
-  converting at both ends. A binary native call path would not pay that. It is
-  charged to its own clock precisely so it never gets folded into `crypto ms`.
+- It does not prove `cli/protocol.mjs` is correct, and it never could. The
+  difference since 0.3.2 is that it is now the same code: the script calls
+  `sendPayload` and `receivePayload` rather than reimplementing them, so a
+  divergence introduced there shows up here as a changed number or a section 0
+  failure rather than as nothing at all. The test suite is still what checks the
+  CLI for correctness.
+- The `crypto ms` columns are `cli/protocol.mjs` reporting its own clock, the
+  same `cryptoMs` that `ratchet send --stats` prints. They are not computed
+  here. That also means they include the handshake opens, which start before
+  `wall ms` starts counting, so `crypto ms` can exceed `wall ms` on a small
+  payload and that is not a bug.
+- One reimplementation survives, in section 3, and it is guarded rather than
+  trusted. See below.
 - Payload bytes are random, which is the worst case for anything downstream that
   compresses. Nothing here compresses, so it does not matter, but do not read
   these numbers as applying to a compressing transport.
@@ -169,6 +279,33 @@ see the shape of the answer on a real network without running one:
 
 That is the whole point of the split. A 115 ms handshake over a relay and a 20
 ms handshake on loopback are the same library doing the same work.
+
+### Section 3 is the one place the script still drives the engine itself
+
+Everywhere else the benchmark calls `cli/protocol.mjs`. Section 3 cannot,
+and the reason is worth stating rather than hiding, because an unguarded copy is
+what produced the 0.3.2 correction at the top of this file.
+
+`cli/protocol.mjs` reports one cumulative `cryptoMs` per transfer and has no
+handshake-only figure. The `onHandshake` callback fires at exactly the right
+moment but carries no clock. So the crypto against transport split that section
+3 exists to show cannot be read out of a real transfer: the smallest transfer
+that module will perform still seals a header and opens an acknowledgement after
+`handshakeMs` has stopped, which would drive the transport column negative on
+loopback. Rather than quietly change what section 3 measures, the five engine
+calls are driven here.
+
+It is a timing harness for five calls and not a second copy of the wire
+protocol. No chunk loop, no header JSON, no framing arithmetic, and
+`PROTOCOL_VERSION` comes from the import. The charging matches
+`cli/protocol.mjs` call for call, including which conversions sit outside the
+clock and why.
+
+And it is checked. Every counted transfer in section 1 hands back the real
+`handshakeMs` from `cli/protocol.mjs`, both sides, and the script prints those
+medians in a second table next to the harness's own with the ratio between them.
+If the two ever disagree by more than a factor of two the script prints `DRIFT`
+and names the side. That is the guard the old copy never had.
 
 ### What section 3 does not mean
 
@@ -313,6 +450,14 @@ tail stays visible rather than being summarised away.
 
 ## Measured output
 
+> **STALE, KEPT ON PURPOSE.** This capture predates the 0.3.2 correction at the
+> top of this file and the `src` changes described there. Its section 5 token
+> codec figures are several times slower than the current build, and its
+> `sender crypto` of 21.28 ms is the old copy's clock, which was charged for
+> base64 the CLI did not perform. Nothing here has been altered or removed,
+> because this is the record of what was published. Do not quote it. Re-run the
+> script.
+
 `node bench/wire.mjs --runs 5`, on an idle machine, 2026-08-07:
 
 ```
@@ -438,8 +583,19 @@ explanations, neither established:
    with a small window, a burst can stall where a drip did not, and the process
    that got faster at computing can get slower at delivering.
 
-Explanation 2 would be the more interesting result and it is the reason this is
-not being filed as noise by default. Distinguishing them needs the same file
+A third candidate arrived after this appendix was written, and it is now the
+leading one. A socket drain stall was found in the framed transport and is being
+fixed separately: under it, a sender that hands frames to the socket faster than
+the kernel buffer drains can park on a `drain` event that arrives late, which
+produces exactly sample B's shape, a normal handshake followed by a wall time
+several times too long. **Nothing about sample B should be read as a property of
+the crypto.** Its handshake and its crypto columns are in line with the other
+two samples; only the wall clock is not, and the wall clock is the transport.
+Until that fix has been measured over the same link, treat 0.60 MB/s as an
+unexplained transport observation and not as a number about this library.
+
+Explanation 2 would still be an interesting result if it survived, and it is the
+reason this is not being filed as plain noise. Distinguishing all three needs the same file
 sent alternately by both versions inside one window, medians rather than single
 runs, against a receiver that stays up. `recv --once` exits after one completed
 transfer by design, so an A/B series needs the receiver started without it:
