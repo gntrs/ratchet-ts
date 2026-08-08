@@ -1,5 +1,5 @@
 /**
- * HMAC-SHA256 and HKDF-SHA256 with an optional native fast path.
+ * HMAC-SHA256, HMAC-SHA512 and HKDF-SHA256 with an optional native fast path.
  *
  * Same contract as src/aead.ts and src/curves.ts, for the same reason: this
  * file exists to make the key schedule faster and to change nothing else. Every
@@ -16,13 +16,20 @@
  * pure JavaScript SHA-256 compression; node:crypto hands the same two calls to
  * OpenSSL, which on this machine costs about 5.5 us less per direction.
  *
- * WHAT THIS FILE DELIBERATELY DOES NOT CHANGE. kdfChain still performs exactly
- * two HMAC-SHA256 invocations, under the same two constants, in the same order.
- * Collapsing them into one HMAC-SHA512 split into two halves is worth roughly
- * three times what this change is worth, and it changes every derived key in
- * every session, breaks every deployed peer and invalidates test/vectors.json.
- * That belongs to a breaking release. It does not belong here, and half of it
- * belongs here even less.
+ * WHAT CHANGED IN 0.4.0. The paragraph that used to sit here said kdfChain
+ * performs exactly two HMAC-SHA256 invocations and that collapsing them into one
+ * HMAC-SHA512 split into halves "belongs to a breaking release". This is that
+ * breaking release, so `hmacSha512` now lives beside `hmacSha256` and src/kdf.ts
+ * calls it once per chain step instead of calling HMAC-SHA256 twice. The
+ * argument for why one PRF is not a weakening is in kdf.ts, next to the code it
+ * justifies.
+ *
+ * The two digests share one resolved backend and one probe. A runtime whose
+ * node:crypto has SHA-256 but not SHA-512 therefore loses the fast path for
+ * both rather than getting a half-native key schedule, which is the safer of
+ * the two failure modes: the fallback is @noble, which is correct everywhere,
+ * and a partially native probe result is a thing nobody would think to look at
+ * when the numbers came out wrong.
  *
  * Portability rule, inherited verbatim from aead.ts and equally non negotiable:
  * src/ contains no static `node:` import. Reaching node:crypto happens lazily,
@@ -32,11 +39,13 @@
  */
 
 import { hmac } from '@noble/hashes/hmac.js';
-import { sha256 } from '@noble/hashes/sha2.js';
+import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { expand, extract } from '@noble/hashes/hkdf.js';
+import { randomBytes as nobleRandomBytes } from '@noble/hashes/utils.js';
 
 /** Algorithm names as node:crypto spells them. */
 const NATIVE_HMAC_ALGORITHM = 'sha256';
+const NATIVE_HMAC512_ALGORITHM = 'sha512';
 const NATIVE_HKDF_DIGEST = 'sha256';
 
 /**
@@ -151,6 +160,81 @@ const RFC4231: readonly { readonly key: string; readonly data: string; readonly 
 ];
 
 /**
+ * The same idea for SHA-512, moved to that digest's own boundaries.
+ *
+ * SHA-512 has a 128 byte block, not 64, so the "pad the key" against "hash the
+ * key first" split that PROBE_HMAC_CASES probes at 64/65 lives at 128/129 here.
+ * A wrapper that hard coded 64 would agree with @noble on every ordinary key
+ * and diverge only in this band, which is why the band is what gets looked at.
+ *
+ * The 32 byte key with a one byte message is the real case: that is exactly what
+ * kdfChain asks for on every single message in both directions.
+ */
+const PROBE_HMAC512_CASES: readonly { readonly key: Uint8Array; readonly message: Uint8Array }[] = [
+  { key: EMPTY, message: EMPTY },
+  { key: repeated(0x2b, 32), message: Uint8Array.of(0x01) },
+  { key: repeated(0x2b, 32), message: EMPTY },
+  { key: repeated(0x5c, 128), message: Uint8Array.of(0x01) },
+  { key: repeated(0x36, 129), message: Uint8Array.of(0x01) },
+  { key: repeated(0x36, 200), message: repeated(0xa5, 300) },
+];
+
+/**
+ * RFC 4231 section 4 again, the HMAC-SHA-512 half.
+ *
+ * Cases 1, 2, 3, 4 and 6. Case 5 is omitted for the reason the SHA-256 list
+ * gives, that the RFC publishes only its truncation. Case 7 is omitted because
+ * its data block could not be transcribed from the RFC with the same confidence
+ * as the rest, and a vector this file cannot vouch for is worse than no vector:
+ * it would look like an independent check while actually pinning a number this
+ * project computed for itself. The 200 byte key and 300 byte message in
+ * PROBE_HMAC512_CASES already exercise the long key and long data path against
+ * @noble, which is what case 7 is for.
+ *
+ * These are checked against @noble as well as against the candidate, so a
+ * transcription error fails the probe rather than silently weakening it.
+ */
+const RFC4231_SHA512: readonly { readonly key: string; readonly data: string; readonly mac: string }[] = [
+  {
+    key: '0b'.repeat(20),
+    data: '4869205468657265',
+    mac:
+      '87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde' +
+      'daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854',
+  },
+  {
+    key: '4a656665',
+    data: '7768617420646f2079612077616e7420666f72206e6f7468696e673f',
+    mac:
+      '164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554' +
+      '9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737',
+  },
+  {
+    key: 'aa'.repeat(20),
+    data: 'dd'.repeat(50),
+    mac:
+      'fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39' +
+      'bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb',
+  },
+  {
+    key: '0102030405060708090a0b0c0d0e0f10111213141516171819',
+    data: 'cd'.repeat(50),
+    mac:
+      'b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3db' +
+      'a91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd',
+  },
+  {
+    key: 'aa'.repeat(131),
+    data:
+      '54657374205573696e67204c6172676572205468616e20426c6f636b2d53697a' +
+      '65204b6579202d2048617368204b6579204669727374',
+    mac:
+      '80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f352' +
+      '6b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598',
+  },
+];
+
+/**
  * HKDF shapes. The first two are exactly what kdfRoot and kdfHandshake ask for,
  * including their output lengths, because an expand that is correct at 32 bytes
  * and wrong at 64 is a plausible bug and 64 is what the root ratchet uses. The
@@ -212,6 +296,12 @@ interface NativeHmac {
 interface NativeCryptoLike {
   createHmac(algorithm: string, key: Uint8Array): NativeHmac;
   hkdfSync(digest: string, ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, keylen: number): ArrayBuffer;
+  /**
+   * Optional on purpose. `looksUsable` does not require it, because demanding
+   * it would demote a runtime that has `createHmac` and `hkdfSync` but not this
+   * off the native path for all three, trading 5.5 us to save 0.8.
+   */
+  randomFillSync?(buffer: Uint8Array): Uint8Array;
 }
 
 let resolved: NativeCryptoLike | null = null;
@@ -262,6 +352,21 @@ function probe(mod: NativeCryptoLike): boolean {
     const mac = fromHex(vector.mac);
     if (!sameBytes(hmac(sha256, key, data), mac)) return false;
     const actual = nativeHmacSha256(mod, key, data);
+    if (actual === null || !sameBytes(actual, mac)) return false;
+  }
+
+  for (const testCase of PROBE_HMAC512_CASES) {
+    const expected = hmac(sha512, testCase.key, testCase.message);
+    const actual = nativeHmacSha512(mod, testCase.key, testCase.message);
+    if (actual === null || !sameBytes(actual, expected)) return false;
+  }
+
+  for (const vector of RFC4231_SHA512) {
+    const key = fromHex(vector.key);
+    const data = fromHex(vector.data);
+    const mac = fromHex(vector.mac);
+    if (!sameBytes(hmac(sha512, key, data), mac)) return false;
+    const actual = nativeHmacSha512(mod, key, data);
     if (actual === null || !sameBytes(actual, mac)) return false;
   }
 
@@ -427,6 +532,25 @@ function nativeHmacSha256(mod: NativeCryptoLike, key: Uint8Array, message: Uint8
 }
 
 /**
+ * Native HMAC-SHA512, and the same contract as the SHA-256 one above: null
+ * rather than a throw, so every caller has exactly one thing to do on failure.
+ *
+ * The digest is copied for the same reason too. This one is the chain step, so
+ * its 64 bytes ARE the next chain key and the message key, and `wipe` has to be
+ * zeroing memory this library owns rather than a window onto Node's Buffer pool.
+ */
+function nativeHmacSha512(mod: NativeCryptoLike, key: Uint8Array, message: Uint8Array): Uint8Array | null {
+  if (!isBytes(key) || !isBytes(message)) return null;
+  try {
+    const mac = mod.createHmac(NATIVE_HMAC512_ALGORITHM, key);
+    mac.update(message);
+    return Uint8Array.from(mac.digest());
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Native HKDF-SHA256, extract and expand in one call.
  *
  * hkdfSync returns a freshly allocated ArrayBuffer rather than a pooled Buffer,
@@ -478,6 +602,23 @@ export function hmacSha256(key: Uint8Array, message: Uint8Array): Uint8Array {
 }
 
 /**
+ * HMAC-SHA512. Byte identical on both backends for every key and message
+ * length, including empty keys, empty messages, and keys either side of the
+ * 128 byte block boundary.
+ *
+ * The key belongs to the caller and is neither modified nor wiped. The 64 bytes
+ * that come back are secret key material in every current call site: wipe them.
+ */
+export function hmacSha512(key: Uint8Array, message: Uint8Array): Uint8Array {
+  const native = activeNative();
+  if (native !== null) {
+    const mac = nativeHmacSha512(native, key, message);
+    if (mac !== null) return mac;
+  }
+  return hmac(sha512, key, message);
+}
+
+/**
  * HKDF-SHA256 as RFC 5869 defines it: extract with `salt` as the HMAC key, then
  * expand under `info` to `length` bytes.
  *
@@ -492,4 +633,35 @@ export function hkdfSha256(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, 
     if (okm !== null) return okm;
   }
   return nobleHkdfSha256(ikm, salt, info, length);
+}
+
+/**
+ * Fill `out` with cryptographic randomness, natively where node:crypto is here.
+ *
+ * THIS ONE IS NOT PROBED, AND THE REASON MATTERS. Every other native path in
+ * this file earns its place by producing bytes identical to the JavaScript one
+ * on a fixed corpus. A CSPRNG has no known answer, so there is nothing to
+ * compare against and the only check available is a shape check: the method
+ * exists and it returned as many bytes as we asked for. That is a weaker
+ * guarantee than the rest of the file offers and it should not be mistaken for
+ * the same discipline.
+ *
+ * It is acceptable here for two reasons. Both paths bottom out in the same
+ * platform entropy source one level down, `@noble/hashes` calling
+ * `crypto.getRandomValues` and node calling its own CSPRNG, so this is a
+ * wrapper choice rather than an entropy choice. And a wrong answer here is not
+ * a wire incompatibility that surfaces months later on somebody else's machine:
+ * a nonce of the wrong length is refused by the encoder immediately.
+ *
+ * Worth 0.81 us per seal at 12 bytes, measured, which is about a third of what
+ * carrying a random nonce costs at all.
+ */
+export function fillRandom(out: Uint8Array): Uint8Array {
+  const native = activeNative();
+  if (native !== null && typeof native.randomFillSync === 'function') {
+    const filled = native.randomFillSync(out);
+    if (filled.length === out.length) return out;
+  }
+  out.set(nobleRandomBytes(out.length));
+  return out;
 }

@@ -260,7 +260,10 @@ test('malformed key and nonce lengths are rejected, not silently padded', () => 
   for (const badKey of [randomBuf(31), randomBuf(33), new Uint8Array(0)]) {
     assert.throws(() => sealAeadSync(badKey, nonce, new Uint8Array(4)));
   }
-  for (const badNonce of [randomBuf(12), randomBuf(23), randomBuf(25)]) {
+  // 12 is no longer here: since 0.4.0 it is the RFC 8439 nonce the ratchet
+  // actually uses, and the 24 byte form is kept only for callers that still
+  // want an extended nonce. Both are legal, everything either side is not.
+  for (const badNonce of [randomBuf(11), randomBuf(13), randomBuf(23), randomBuf(25)]) {
     assert.throws(() => sealAeadSync(key, badNonce, new Uint8Array(4)));
   }
 });

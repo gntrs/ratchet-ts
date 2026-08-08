@@ -28,22 +28,33 @@ import type { Party } from './harness.js';
 /**
  * The bytes-native seal and open.
  *
- * The whole point of this pair is that it changes NOTHING on the wire. It skips
- * a base64 encode and an immediate base64 decode that a binary transport was
- * paying twice per chunk per direction, and a shortcut that alters the bytes is
- * not a shortcut, it is a fork of the protocol. So the first and heaviest test
- * here is byte identity against the path 0.3.0 shipped, and the second is that
- * envelopes cross between the two paths in both directions. Everything after
- * those two is the ratchet behaviour that must have come along unchanged,
- * which it should have, because the new functions call the same ones.
+ * The whole point of this pair is that it changes NOTHING on the wire relative
+ * to the string path of the same version. It skips a base64 encode and an
+ * immediate base64 decode that a binary transport was paying twice per chunk per
+ * direction, and a shortcut that alters the bytes is not a shortcut, it is a
+ * fork of the protocol. So the first and heaviest test here is byte identity
+ * against the token detour, and the second is that envelopes cross between the
+ * two paths in both directions. Everything after those two is the ratchet
+ * behaviour that must have come along unchanged, which it should have, because
+ * the new functions call the same ones.
  *
- * "The path 0.3.0 shipped" means, precisely, what cli/protocol.mjs does today:
+ * "The token detour" means, precisely, what cli/protocol.mjs does:
  *
  *   send     engine.sealBytes  -> token, then toWire   = encodeEnvelopeBytes(decodeEnvelope(token))
  *   receive  fromWire = encodeEnvelope(decodeEnvelopeBytes(frame)), then engine.openBytes
  *
  * Those four steps are spelled out rather than imported so this file keeps
- * testing the old shape even after the CLI stops using it.
+ * testing that shape even after the CLI stops using it.
+ *
+ * WHAT 0.4.0 CHANGED HERE, AND WHAT IT CHANGED BACK. A draft of 0.4.0 derived
+ * the nonce from the message number, which made a seal a pure function of
+ * (session, plaintext) and let this file compare two independent seals byte for
+ * byte. That derivation was reverted: a rollback of session state replays a
+ * message key, and under a repeated nonce the two ciphertexts XOR to the two
+ * plaintexts. 0.4.0 ships a 12 byte random nonce on the wire instead, so a seal
+ * is again unreproducible and the comparison below is once more between one
+ * sealed payload and two encoders over it, plus a field by field check of two
+ * live seals that skips the two fields randomness is allowed to move.
  */
 
 const SIZES = [0, 1, 255, 65_519];
@@ -102,11 +113,22 @@ function sampleAccept(): AcceptPayload {
 function sampleMessage(plaintextLength: number): MessagePayload {
   return {
     kind: 'message',
-    conversationId: CONVERSATION_ID,
+    sessionTag: Uint8Array.of(0xa0, 0xa1, 0xa2, 0xa3),
     ratchetPublic: randomBytes(32),
     messageNumber: 7,
     previousChainLength: 3,
-    nonce: randomBytes(24),
+    nonce: randomBytes(12),
+    ciphertext: randomBytes(plaintextLength + 16),
+  };
+}
+
+/** The same, without the ratchet key, which is the common case on the wire. */
+function samplePlainMessage(plaintextLength: number): MessagePayload {
+  return {
+    kind: 'message',
+    sessionTag: Uint8Array.of(0xa0, 0xa1, 0xa2, 0xa3),
+    messageNumber: 7,
+    nonce: randomBytes(12),
     ciphertext: randomBytes(plaintextLength + 16),
   };
 }
@@ -116,50 +138,56 @@ function sampleMessage(plaintextLength: number): MessagePayload {
 // ---------------------------------------------------------------------------
 
 /**
- * The literal comparison the brief asks for, stated exactly as far as it can
- * honestly go.
+ * The literal comparison, in the only form a random nonce leaves available.
  *
- * Sealing the same plaintext twice cannot produce the same bytes: the nonce is
- * 24 fresh random bytes per message, deliberately, so that no counter has to
- * survive a state rollback. What CAN be compared, and is the actual claim, is
- * that the two paths differ ONLY in which encoder runs over one sealed payload.
- * So this test takes a payload from a real seal and drives both encoders over
- * it, which is the whole of the difference between the paths, and then checks
- * the new path independently produces an envelope that agrees field for field
- * on everything except the nonce and the ciphertext it seals under that nonce.
+ * Two claims. First, the two paths differ ONLY in which encoder runs over one
+ * sealed payload, so both encoders over that one payload give identical bytes.
+ * That half is still exact and it is the half that would catch a fork.
+ *
+ * Second, the new path run for real from a clone of the same starting session
+ * produces an envelope of the same length with the same header, the same
+ * counters and the same ratchet key. It does NOT produce the same nonce or the
+ * same ciphertext, and a build where it did would mean the CSPRNG had stopped
+ * being consulted. So those two fields are asserted DIFFERENT rather than
+ * skipped: the assertion that used to be `deepEqual` is now `notDeepEqual`, and
+ * it is testing the property that motivated the change.
  */
-test('wire identity: the new seal emits exactly the bytes toWire made from the old token', async () => {
+test('wire identity: both encoders agree on one payload, and two live seals differ only in nonce and body', async () => {
   const { alice } = await connectedPair();
 
   for (const size of SIZES) {
     const plaintext = randomBytes(size);
 
-    // The 0.3.0 send path, in full.
+    // The string send path, in full.
     const before = cloneSession(alice.session);
     const old = ratchetEncryptBytes(alice.session, plaintext);
     alice.session = old.session;
     const oldFrame = toWire(encodeEnvelope(old.payload));
 
     // The new path's entire contribution: the other encoder on that payload.
+    // Exact, because there is only one seal involved.
     assert.deepEqual(encodeEnvelopeBytes(old.payload), oldFrame, `size ${size}`);
 
-    // And the new path run for real, from a clone of the session the old seal
-    // started from, so the two are answering the identical question.
+    // And the new path run for real, from a clone of the session the string
+    // seal started from, so the two are answering the identical question with
+    // two independent draws from the CSPRNG.
     const fresh = ratchetEncryptToEnvelopeBytes(before, plaintext);
+    assert.equal(fresh.envelope.length, oldFrame.length, `size ${size}`);
+
     const mine = asMessage(decodeEnvelopeBytes(fresh.envelope));
     const theirs = asMessage(decodeEnvelope(fromWire(oldFrame)));
-
-    assert.equal(fresh.envelope.length, oldFrame.length, `size ${size} envelope length`);
-    assert.equal(mine.conversationId, theirs.conversationId);
+    // Everything the session decides is identical.
+    assert.deepEqual(mine.sessionTag, theirs.sessionTag);
     assert.deepEqual(mine.ratchetPublic, theirs.ratchetPublic);
     assert.equal(mine.messageNumber, theirs.messageNumber);
     assert.equal(mine.previousChainLength, theirs.previousChainLength);
-    assert.equal(mine.nonce.length, theirs.nonce.length);
-    assert.equal(mine.ciphertext.length, theirs.ciphertext.length);
-    // The one field that must differ, because a repeated nonce under one
-    // message key is a total break. If this ever passes, the test above is
-    // measuring a broken RNG rather than a faithful encoder.
-    assert.notDeepEqual(mine.nonce, theirs.nonce);
+    // Everything the CSPRNG decides is not. Same length, different bytes, and
+    // the ciphertext follows the nonce because the keystream depends on it.
+    assert.equal(mine.nonce.length, 12);
+    assert.equal(theirs.nonce.length, 12);
+    assert.notDeepEqual(mine.nonce, theirs.nonce, `size ${size}`);
+    assert.notDeepEqual(mine.ciphertext, theirs.ciphertext, `size ${size}`);
+    assert.equal(mine.ciphertext.length, theirs.ciphertext.length, `size ${size}`);
   }
 });
 
@@ -177,6 +205,9 @@ test('wire identity holds for every envelope kind and every payload size', () =>
     sampleInvite(),
     sampleAccept(),
     ...SIZES.map((size) => sampleMessage(size)),
+    // The keyless header is the common case and takes a different branch in
+    // both the encoder and the decoder, so it needs its own pass.
+    ...SIZES.map((size) => samplePlainMessage(size)),
   ];
   for (const payload of payloads) {
     const direct = encodeEnvelopeBytes(payload);
@@ -190,28 +221,28 @@ test('wire identity holds for every envelope kind and every payload size', () =>
 });
 
 // ---------------------------------------------------------------------------
-// Cross open, which is the 0.3.0 interop proof
+// Cross open, which is the proof the two paths are one protocol
 // ---------------------------------------------------------------------------
 
-test('a token from the 0.3.0 seal opens on the new bytes path', async () => {
+test('a token from the string seal opens on the bytes path', async () => {
   const { alice, bob } = await connectedPair();
 
   for (const size of SIZES) {
     const plaintext = randomBytes(size);
     const sealed = await engine.sealBytes(alice.session, plaintext);
     alice.session = sealed.session;
-    // A 0.3.0 peer puts exactly toWire(token) on the socket.
+    // A token-based peer puts exactly toWire(token) on the socket.
     assert.deepEqual(receiveWire(bob, toWire(sealed.token)), plaintext, `size ${size}`);
   }
 });
 
-test('bytes from the new seal open on the 0.3.0 string path', async () => {
+test('bytes from the new seal open on the string path', async () => {
   const { alice, bob } = await connectedPair();
 
   for (const size of SIZES) {
     const plaintext = randomBytes(size);
     const frame = sendWire(alice, plaintext);
-    // A 0.3.0 peer reads the socket and calls fromWire before engine.openBytes.
+    // A token-based peer reads the socket and calls fromWire before openBytes.
     const opened = await engine.openBytes(bob.session, fromWire(frame));
     bob.session = opened.session;
     assert.deepEqual(opened.plaintext, plaintext, `size ${size}`);
@@ -248,8 +279,10 @@ test('a full conversation alternating between the two paths stays in step', asyn
  * under a different chain. Sessions are compared whole, arrays included, which
  * `deepEqual` does for Uint8Array.
  *
- * The send side really is fully deterministic given the session: the random
- * nonce lands in the payload, never in the state.
+ * The send side is fully deterministic given the session, and it stays that way
+ * under a random nonce, because the randomness lands in the payload and never
+ * in the state. That was true in 0.3.x for the same reason and it is what lets
+ * this comparison be a whole-session `deepEqual` rather than a field list.
  */
 test('the session after the new seal is field for field the session after the old one', async () => {
   const { alice } = await connectedPair();
@@ -373,8 +406,8 @@ test('a flipped bit fails closed and leaves the session usable', async () => {
 
   const plaintext = randomBytes(1024);
   const honest = sendWire(alice, plaintext);
-  // Deep inside the ciphertext, past the two byte header and the fixed body
-  // fields, so this is a payload edit rather than a decode error.
+  // Deep inside the ciphertext, past the header, so this is a payload edit
+  // rather than a decode error.
   const tampered = flipByte(honest, honest.length - 64);
 
   await expectFailure('authentication_failed', async () => receiveWire(bob, tampered));
@@ -388,7 +421,11 @@ test('a corrupted envelope header fails closed as a malformed envelope', async (
   const { alice, bob } = await connectedPair();
 
   const honest = sendWire(alice, randomBytes(64));
-  const badVersion = flipByte(honest, 0);
+  // The version now lives in the high nibble of byte 0, so a stale peer is a
+  // different nibble rather than a different byte. Flipping the low bit would
+  // set the reserved flag instead and is a shape error, tested separately.
+  const badVersion = Uint8Array.from(honest);
+  badVersion[0] = (badVersion[0]! & 0x0f) | 0x10;
   await expectFailure('unknown_version', async () => receiveWire(bob, badVersion));
   await expectFailure('malformed_token', async () => receiveWire(bob, honest.subarray(0, 20)));
   // A handshake envelope where a chunk belongs is a protocol error, not a
@@ -445,15 +482,17 @@ test('the skip limit still bounds the work one message can demand', async () => 
 
 /**
  * The CLI's real workload, both ways, so the saving is a number rather than a
- * claim: 12 chunks of 65519 bytes, which is one 786 kB file at the largest
- * plaintext an OCX1 frame can carry.
+ * claim: 12 chunks of 65519 bytes, which is one 786 kB file at the chunk
+ * ceiling the CLI picked when the ciphertext still had a u16 length prefix in
+ * front of it. The prefix is gone in 0.4.0 and the ceiling could rise, but the
+ * point of this test is the comparison, so the size stays where it was.
  *
- * Each iteration is a full send and receive. The old path is written out step
- * by step instead of being imported, because the four calls below ARE 0.3.0:
- * engine.sealBytes base64s the envelope into a token, toWire un-base64s it back
- * into the bytes it just was, fromWire base64s those bytes into a token again,
- * and engine.openBytes un-base64s that. Four base64 passes over 786 kB per
- * transfer, all of it round tripping to the same place.
+ * Each iteration is a full send and receive. The token path is written out step
+ * by step instead of being imported, because these four calls are what a
+ * text-transport peer actually does: seal base64s the envelope into a token,
+ * toWire un-base64s it back into the bytes it just was, fromWire base64s those
+ * bytes into a token again, and open un-base64s that. Four base64 passes over
+ * 786 kB per transfer, all of it round tripping to the same place.
  *
  * The assertion is only that the new path wins, which it must by construction
  * since it does strictly less work on identical input. The interesting output

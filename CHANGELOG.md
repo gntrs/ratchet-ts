@@ -5,6 +5,94 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-08
+
+**Breaking. The wire format changed and 0.3.x peers cannot read it.** A 0.3.x
+peer fails with `unknown_version` rather than a confusing decode error, and
+serialized sessions from 0.3.x fail the same way. Both ends and any persisted
+state have to move together.
+
+### Changed
+
+- **Message overhead is 34 bytes, down from 122.** A 20 byte message is 54
+  bytes on the wire instead of 142, and a 256 byte message is 290 instead of
+  378. The header packs version, kind and a ratchet-key flag into one byte,
+  carries a 4 byte session tag instead of a 32 character hex conversation id,
+  uses canonical varints for the counters, and drops the length prefix on the
+  ciphertext, which now runs to the end of the frame.
+
+  The fields that left the wire did not leave the AEAD. The full 16 byte
+  conversation id and the full 32 byte ratchet public key are still bound as
+  associated data, rebuilt on the receiving side from session state. Binding
+  data that is not transmitted is what associated data is for.
+
+- **The ratchet public key travels on the first three messages of a chain, not
+  on all of them.** Sending it once would be enough on a lossless transport and
+  is what a 22 byte header assumes. It is not enough on a lossy one: a receiver
+  cannot step its DH ratchet until it sees the new key, so losing the single
+  message that carried it poisons the rest of that chain. Three costs 33 extra
+  bytes on two messages per chain instead of on every message, which keeps
+  roughly 90 percent of the saving with a bounded failure.
+
+- **The chain step is one HMAC-SHA512 instead of two HMAC-SHA256.** One call
+  produces 64 bytes, split into the next chain key and the message key. That is
+  what HKDF-Expand does internally, so it is not a weaker construction, and it
+  measured 1.5 microseconds cheaper per message.
+
+- **The header is the associated data.** 0.3.x serialized the same fields twice
+  per seal, once into an AAD buffer and once into the envelope. The header is
+  now written once into the output buffer and that same slice is handed to the
+  AEAD. Worth 3.2 microseconds, the largest single saving in this release.
+
+- **XChaCha20-Poly1305 with a 24 byte nonce became ChaCha20-Poly1305 with a 12
+  byte one.** The 24 byte form pays an HChaCha20 subkey derivation in
+  TypeScript on every message, because `node:crypto` exposes only the 12 byte
+  form. The nonce is still random per seal, from the CSPRNG.
+
+  A draft of this release derived the nonce from the message number instead,
+  which would have made the header 22 bytes and saved a further 3.4
+  microseconds. It was reverted before shipping. Both schemes are safe under
+  correct operation. They differ under state rollback, which `serialize.ts`
+  makes a real operation rather than a theoretical one: a derived nonce
+  reproduces exactly under a replayed message key, so the two ciphertexts share
+  a keystream and an observer holding both recovers the XOR of the plaintexts.
+  A random nonce turns the same accident into a forgery risk instead of a
+  plaintext disclosure. A restored snapshot is still a dead session either way
+  and still requires a re-handshake.
+
+- Skipped message keys are now parked under a chain epoch and a message number
+  rather than a base64 encoding of the 32 byte ratchet public key. 0.3.x built
+  a 43 character string on every open in order to query a map that is empty in
+  the ordinary case. The empty case now allocates nothing.
+
+- `ENVELOPE_VERSION` is `OCX2`, the binary envelope version byte is `0x02`, and
+  the serialized session version is 2.
+
+### Removed
+
+- The author email is no longer published in package metadata. It was in every
+  release from 0.1.0 through 0.3.4 and those remain on the registry; this stops
+  it going out again.
+
+### Performance
+
+Published 0.3.4 from the registry against this tree, both arms interleaved in
+one process so scheduler and JIT drift lands on both. AMD Ryzen 5 7530U,
+Node v25.8.0, Windows 11, 256 byte payload, AEAD, curve and hash backends all
+reporting `native`, medians of many rounds.
+
+| | 0.3.4 | 0.4.0 | |
+| --- | --- | --- | --- |
+| seal | 24.86 us | 16.36 us | 1.52x less CPU work |
+| overhead per message | 122 B | 34 B | |
+
+Against the Signal Double Ratchet message construction measured on the same
+machine in the same runtime, 0.4.0 is 1.88x less CPU work at p50. That is
+construction against construction, not product against product: libsignal is
+Rust and would be faster at the same construction, the figure is CPU only, and
+it says nothing about any deployed messenger, where network round trips are
+three to four orders of magnitude larger than any of this.
+
 ## [0.3.4] - 2026-08-08
 
 ### Added

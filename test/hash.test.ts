@@ -23,7 +23,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { hmac } from '@noble/hashes/hmac.js';
-import { sha256 } from '@noble/hashes/sha2.js';
+import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { expand, extract } from '@noble/hashes/hkdf.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
@@ -37,6 +37,7 @@ import {
   hashReady,
   hkdfSha256,
   hmacSha256,
+  hmacSha512,
 } from '../src/hash.js';
 import type { HashBackend } from '../src/hash.js';
 import { acceptInvite, beginInvite, completeInvite } from '../src/handshake.js';
@@ -160,6 +161,61 @@ const RFC4231: [string, string, string, string][] = [
   ],
 ];
 
+/**
+ * RFC 4231 section 4 again, the SHA-512 column.
+ *
+ * The same cases and the same omission of case 5, for the same reason. These
+ * matter as much as the SHA-256 ones since 0.4.0, because the chain step is now
+ * a single HMAC-SHA512 and a native backend that disagreed with @noble on it
+ * would desynchronise two peers rather than fail loudly.
+ */
+const RFC4231_SHA512: [string, string, string, string][] = [
+  [
+    'case 1',
+    '0b'.repeat(20),
+    '4869205468657265',
+    '87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde' +
+      'daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854',
+  ],
+  [
+    'case 2',
+    '4a656665',
+    '7768617420646f2079612077616e7420666f72206e6f7468696e673f',
+    '164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554' +
+      '9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737',
+  ],
+  [
+    'case 3',
+    'aa'.repeat(20),
+    'dd'.repeat(50),
+    'fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39' +
+      'bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb',
+  ],
+  [
+    'case 4',
+    '0102030405060708090a0b0c0d0e0f10111213141516171819',
+    'cd'.repeat(50),
+    'b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3db' +
+      'a91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd',
+  ],
+  [
+    'case 6, 131 byte key',
+    'aa'.repeat(131),
+    '54657374205573696e67204c6172676572205468616e20426c6f636b2d53697a65204b6579202d2048617368204b6579204669727374',
+    '80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f352' +
+      '6b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598',
+  ],
+  [
+    'case 7, 131 byte key and long data',
+    'aa'.repeat(131),
+    '5468697320697320612074657374207573696e672061206c6172676572207468616e20626c6f636b2d73697a65206b657920616e64206' +
+      '1206c6172676572207468616e20626c6f636b2d73697a6520646174612e20546865206b6579206e6565647320746f2062652068617368' +
+      '6564206265666f7265206265696e6720757365642062792074686520484d414320616c676f726974686d2e',
+    'e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944' +
+      'b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58',
+  ],
+];
+
 /** RFC 5869 appendix A, the SHA-256 cases. */
 const RFC5869: [string, string, string, string, number, string][] = [
   [
@@ -225,6 +281,48 @@ test('RFC 4231 published vectors', () => {
   }
 });
 
+test('hmacSha512 matches noble on 500 random key and message pairs', () => {
+  for (const c of CORPUS) {
+    assert.deepEqual(
+      list(hmacSha512(c.key, c.message)),
+      list(hmac(sha512, c.key, c.message)),
+      `mismatch at key ${c.key.length} message ${c.message.length} on backend ${hashBackend()}`,
+    );
+  }
+});
+
+test('hmacSha512 matches noble across every key and message length boundary', () => {
+  // The boundary that matters here is 128, not 64: SHA-512 has a 128 byte block,
+  // so the "hash the key first" branch opens at a different length than it does
+  // for SHA-256. EDGE_KEY_LENGTHS covers 128 and 129 for exactly this.
+  for (const keyLength of EDGE_KEY_LENGTHS) {
+    const key = randomBytes(keyLength);
+    for (const messageLength of EDGE_MESSAGE_LENGTHS) {
+      const message = randomBytes(messageLength);
+      assert.deepEqual(
+        list(hmacSha512(key, message)),
+        list(hmac(sha512, key, message)),
+        `key ${keyLength} message ${messageLength} on backend ${hashBackend()}`,
+      );
+    }
+  }
+});
+
+test('RFC 4231 published vectors, SHA-512 column', () => {
+  for (const [name, key, data, mac] of RFC4231_SHA512) {
+    assert.equal(toHex(hmac(sha512, hex(key), hex(data))), mac, `${name}: noble disagrees with the RFC`);
+    assert.equal(toHex(hmacSha512(hex(key), hex(data))), mac, `${name} on backend ${hashBackend()}`);
+    for (const backend of ['noble', 'native'] as const) {
+      if (backend === 'native' && !NATIVE_AVAILABLE) continue;
+      assert.ok(
+        withBackend(backend, () => {
+          assert.equal(toHex(hmacSha512(hex(key), hex(data))), mac, `${name} on pinned ${backend}`);
+        }),
+      );
+    }
+  }
+});
+
 test('RFC 5869 published vectors', () => {
   for (const [name, ikm, salt, info, length, okm] of RFC5869) {
     const expected = expand(sha256, extract(sha256, hex(ikm), hex(salt)), hex(info), length);
@@ -281,6 +379,11 @@ test('the two backends produce identical macs on the whole corpus', () => {
     const noble = on('noble', () => hmacSha256(c.key, c.message));
     const native = on('native', () => hmacSha256(c.key, c.message));
     assert.deepEqual(list(native), list(noble), `key ${c.key.length} message ${c.message.length}`);
+    // The SHA-512 MAC is now the hot one: it is the whole chain step, so a
+    // divergence here breaks every message rather than only the handshake.
+    const noble512 = on('noble', () => hmacSha512(c.key, c.message));
+    const native512 = on('native', () => hmacSha512(c.key, c.message));
+    assert.deepEqual(list(native512), list(noble512), `sha512 key ${c.key.length} message ${c.message.length}`);
   }
 
   for (const keyLength of EDGE_KEY_LENGTHS) {
@@ -290,6 +393,9 @@ test('the two backends produce identical macs on the whole corpus', () => {
       const noble = on('noble', () => hmacSha256(key, message));
       const native = on('native', () => hmacSha256(key, message));
       assert.deepEqual(list(native), list(noble), `key ${keyLength} message ${messageLength}`);
+      const noble512 = on('noble', () => hmacSha512(key, message));
+      const native512 = on('native', () => hmacSha512(key, message));
+      assert.deepEqual(list(native512), list(noble512), `sha512 key ${keyLength} message ${messageLength}`);
     }
   }
 });
@@ -334,9 +440,14 @@ test('the kdf edge cases both backends could disagree on', () => {
     new Uint8Array(65).fill(0x5c),
   ];
   for (const chainKey of chainKeys) {
+    // Since 0.4.0 the chain step is ONE HMAC-SHA512 over the single byte 0x01,
+    // split 32/32 into next chain key then message key. 0.3.x used two
+    // HMAC-SHA256, over 0x01 for the message key and 0x02 for the chain key,
+    // and this assertion is the place that pins which of the two is live.
     const reference = kdfChain(chainKey);
-    assert.deepEqual(list(reference.messageKey), list(hmac(sha256, chainKey, Uint8Array.of(0x01))));
-    assert.deepEqual(list(reference.nextChainKey), list(hmac(sha256, chainKey, Uint8Array.of(0x02))));
+    const whole = hmac(sha512, chainKey, Uint8Array.of(0x01));
+    assert.deepEqual(list(reference.nextChainKey), list(whole.subarray(0, 32)));
+    assert.deepEqual(list(reference.messageKey), list(whole.subarray(32, 64)));
     if (!NATIVE_AVAILABLE) continue;
     const noble = on('noble', () => kdfChain(chainKey));
     const native = on('native', () => kdfChain(chainKey));
@@ -348,7 +459,7 @@ test('the kdf edge cases both backends could disagree on', () => {
   const empty = new Uint8Array(0);
   assert.deepEqual(
     list(kdfHandshake(empty, '')),
-    list(expand(sha256, extract(sha256, empty, utf8ToBytes('OCX1 hybrid handshake v1')), empty, 32)),
+    list(expand(sha256, extract(sha256, empty, utf8ToBytes('OCX2 hybrid handshake v1')), empty, 32)),
   );
   if (NATIVE_AVAILABLE) {
     assert.deepEqual(list(on('native', () => kdfHandshake(empty, ''))), list(on('noble', () => kdfHandshake(empty, ''))));
@@ -448,7 +559,9 @@ test('the pure JavaScript fallback is complete on its own', () => {
     withBackend('noble', () => {
       const chainKey = randomBytes(32);
       const step = kdfChain(chainKey);
-      assert.deepEqual(list(step.messageKey), list(hmac(sha256, chainKey, Uint8Array.of(0x01))));
+      const whole = hmac(sha512, chainKey, Uint8Array.of(0x01));
+      assert.deepEqual(list(step.nextChainKey), list(whole.subarray(0, 32)));
+      assert.deepEqual(list(step.messageKey), list(whole.subarray(32, 64)));
       const stepped = kdfRoot(randomBytes(32), randomBytes(32));
       assert.equal(stepped.rootKey.length, 32);
       assert.equal(stepped.chainKey.length, 32);

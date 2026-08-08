@@ -1,5 +1,21 @@
 /**
- * XChaCha20-Poly1305 with an optional native fast path.
+ * ChaCha20-Poly1305 in both nonce sizes, with an optional native fast path.
+ *
+ * TWO NONCE LENGTHS, ONE FUNCTION, AND WHICH ONE YOU GET. A 12 byte nonce is
+ * RFC 8439 ChaCha20-Poly1305, the IETF construction, and it is what the ratchet
+ * uses from 0.4.0 onward. A 24 byte nonce is XChaCha20-Poly1305, the same cipher
+ * with a nonce extension bolted on the front. The length of the nonce you pass
+ * selects the construction, because these are two different algorithms and a
+ * caller that mixes them up must get a different tag rather than a silent
+ * reinterpretation of its nonce.
+ *
+ * The 24 byte form is kept, and kept exact, for two reasons: it is a published
+ * export of this package that callers use outside a ratchet, and bench/wire.mjs
+ * measures it against @noble. The ratchet no longer reaches for it. What the
+ * ratchet gains by moving to 12 bytes is the HChaCha20 subkey derivation below,
+ * which is a full 20 round block operation in JavaScript on every seal and every
+ * open, and which the 12 byte path skips entirely because node:crypto exposes
+ * exactly the nonce size RFC 8439 wants.
  *
  * The whole point of this file is that it produces the same bytes everywhere.
  * A message sealed in a browser on the pure JavaScript backend must open on a
@@ -25,14 +41,17 @@
  * the console.
  */
 
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { chacha20poly1305, xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import type { AeadBackend } from './types.js';
 import { concat, wipe } from './bytes.js';
 import { fail } from './errors.js';
 
 export const AEAD_KEY_LEN = 32;
+/** XChaCha20-Poly1305, the extended nonce form. */
 export const AEAD_NONCE_LEN = 24;
+/** ChaCha20-Poly1305 as RFC 8439 defines it, and what the ratchet uses. */
+export const AEAD_IETF_NONCE_LEN = 12;
 export const AEAD_TAG_LEN = 16;
 
 /** Algorithm id as node:crypto spells it. Not the extended nonce variant: the
@@ -191,28 +210,38 @@ function looksUsable(mod: unknown): mod is NativeCryptoLike {
  * Both an empty and a non empty AAD are checked because the two take different
  * branches in `nativeSeal`, and a round trip is checked because a cipher that
  * encrypts correctly and rejects its own valid tag is just as broken.
+ *
+ * Both nonce lengths are checked, and that is not symmetry for its own sake.
+ * They reach node:crypto by different routes: the 24 byte case hands it a key
+ * this file derived, the 12 byte case hands it the caller's key and the caller's
+ * nonce untouched. A runtime that got the second right and the first wrong is
+ * exactly the kind of thing a shim does, and the 12 byte path is the one every
+ * ratchet message now takes.
  */
 function probe(mod: NativeCryptoLike): boolean {
   const key = new Uint8Array(AEAD_KEY_LEN);
-  const nonce = new Uint8Array(AEAD_NONCE_LEN);
   for (let i = 0; i < key.length; i++) key[i] = i * 7 + 1;
-  for (let i = 0; i < nonce.length; i++) nonce[i] = i * 11 + 3;
   const plaintext = new Uint8Array(77);
   for (let i = 0; i < plaintext.length; i++) plaintext[i] = i * 5;
   const aads = [EMPTY, new Uint8Array([1, 2, 3, 4, 5])];
 
-  for (const aad of aads) {
-    const expected = xchacha20poly1305(key, nonce, aad).encrypt(plaintext);
-    const actual = nativeSeal(mod, key, nonce, plaintext, aad);
-    if (actual.length !== expected.length) return false;
-    // A plain loop, not `equal` from bytes.ts: this is a self test against a
-    // value we generated, not a secret comparison, and it must not depend on a
-    // module whose own behaviour is what is under test elsewhere.
-    for (let i = 0; i < expected.length; i++) if (actual[i] !== expected[i]!) return false;
+  for (const nonceLength of [AEAD_IETF_NONCE_LEN, AEAD_NONCE_LEN]) {
+    const nonce = new Uint8Array(nonceLength);
+    for (let i = 0; i < nonce.length; i++) nonce[i] = i * 11 + 3;
 
-    const reopened = nativeOpen(mod, key, nonce, expected, aad);
-    if (reopened === null || reopened.length !== plaintext.length) return false;
-    for (let i = 0; i < plaintext.length; i++) if (reopened[i] !== plaintext[i]!) return false;
+    for (const aad of aads) {
+      const expected = nobleCipher(key, nonce, aad).encrypt(plaintext);
+      const actual = nativeSeal(mod, key, nonce, plaintext, aad);
+      if (actual.length !== expected.length) return false;
+      // A plain loop, not `equal` from bytes.ts: this is a self test against a
+      // value we generated, not a secret comparison, and it must not depend on a
+      // module whose own behaviour is what is under test elsewhere.
+      for (let i = 0; i < expected.length; i++) if (actual[i] !== expected[i]!) return false;
+
+      const reopened = nativeOpen(mod, key, nonce, expected, aad);
+      if (reopened === null || reopened.length !== plaintext.length) return false;
+      for (let i = 0; i < plaintext.length; i++) if (reopened[i] !== plaintext[i]!) return false;
+    }
   }
   return true;
 }
@@ -310,6 +339,21 @@ export function forceAeadBackend(choice: AeadBackend | 'auto'): AeadBackend {
 // The two backends
 // ---------------------------------------------------------------------------
 
+/**
+ * The (key, iv) pair the native cipher is actually called with.
+ *
+ * For a 12 byte nonce that is the caller's key and the caller's nonce, exactly
+ * as RFC 8439 says, and there is nothing to derive or to wipe. For a 24 byte
+ * nonce it is the HChaCha20 subkey and the 12 byte inner nonce the XChaCha spec
+ * defines, and the subkey is a secret this function minted, so the caller has to
+ * wipe it. `derived` says which of the two happened rather than leaving the
+ * caller to infer it from the nonce length a second time.
+ */
+function nativeInputs(key: Uint8Array, nonce: Uint8Array): { key: Uint8Array; iv: Uint8Array; derived: boolean } {
+  if (nonce.length === AEAD_IETF_NONCE_LEN) return { key, iv: nonce, derived: false };
+  return { key: hchacha20(key, nonce.subarray(0, 16)), iv: innerNonce(nonce), derived: true };
+}
+
 function nativeSeal(
   mod: NativeCryptoLike,
   key: Uint8Array,
@@ -317,9 +361,9 @@ function nativeSeal(
   plaintext: Uint8Array,
   aad: Uint8Array,
 ): Uint8Array {
-  const subkey = hchacha20(key, nonce.subarray(0, 16));
+  const { key: cipherKey, iv, derived } = nativeInputs(key, nonce);
   try {
-    const cipher = mod.createCipheriv(NATIVE_ALGORITHM, subkey, innerNonce(nonce), {
+    const cipher = mod.createCipheriv(NATIVE_ALGORITHM, cipherKey, iv, {
       authTagLength: AEAD_TAG_LEN,
     });
     // Skipped when empty. Poly1305 pads the AAD block to a multiple of 16, and
@@ -333,7 +377,9 @@ function nativeSeal(
     // wire format is defined by that layout, so this order is load bearing.
     return concat(head, tail, cipher.getAuthTag());
   } finally {
-    wipe(subkey);
+    // Only when we derived it. Zeroing the caller's own key would be a
+    // spectacular way to turn a fast path into a data loss bug.
+    if (derived) wipe(cipherKey);
   }
 }
 
@@ -348,9 +394,9 @@ function nativeOpen(
 ): Uint8Array | null {
   if (ciphertext.length < AEAD_TAG_LEN) return null;
   const split = ciphertext.length - AEAD_TAG_LEN;
-  const subkey = hchacha20(key, nonce.subarray(0, 16));
+  const { key: cipherKey, iv, derived } = nativeInputs(key, nonce);
   try {
-    const decipher = mod.createDecipheriv(NATIVE_ALGORITHM, subkey, innerNonce(nonce), {
+    const decipher = mod.createDecipheriv(NATIVE_ALGORITHM, cipherKey, iv, {
       authTagLength: AEAD_TAG_LEN,
     });
     decipher.setAuthTag(ciphertext.subarray(split));
@@ -375,8 +421,17 @@ function nativeOpen(
   } catch {
     return null;
   } finally {
-    wipe(subkey);
+    if (derived) wipe(cipherKey);
   }
+}
+
+/** @noble's cipher for this nonce length. The 12 byte case is RFC 8439 and the
+ * 24 byte case is the extended nonce form; picking on length here is what keeps
+ * the two backends agreeing about which algorithm a call meant. */
+function nobleCipher(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array): { encrypt(p: Uint8Array): Uint8Array; decrypt(c: Uint8Array): Uint8Array } {
+  return nonce.length === AEAD_IETF_NONCE_LEN
+    ? chacha20poly1305(key, nonce, aad)
+    : xchacha20poly1305(key, nonce, aad);
 }
 
 function nobleOpen(
@@ -386,7 +441,7 @@ function nobleOpen(
   aad: Uint8Array,
 ): Uint8Array | null {
   try {
-    return xchacha20poly1305(key, nonce, aad).decrypt(ciphertext);
+    return nobleCipher(key, nonce, aad).decrypt(ciphertext);
   } catch {
     return null;
   }
@@ -400,8 +455,12 @@ function checkInputs(key: Uint8Array, nonce: Uint8Array): void {
   if (key.length !== AEAD_KEY_LEN) {
     fail('malformed_token', `aead key must be ${AEAD_KEY_LEN} bytes, got ${key.length}`);
   }
-  if (nonce.length !== AEAD_NONCE_LEN) {
-    fail('malformed_token', `aead nonce must be ${AEAD_NONCE_LEN} bytes, got ${nonce.length}`);
+  if (nonce.length !== AEAD_NONCE_LEN && nonce.length !== AEAD_IETF_NONCE_LEN) {
+    fail(
+      'malformed_token',
+      `aead nonce must be ${AEAD_IETF_NONCE_LEN} bytes (RFC 8439) or ${AEAD_NONCE_LEN} bytes ` +
+        `(extended nonce), got ${nonce.length}`,
+    );
   }
 }
 
@@ -420,7 +479,7 @@ export function sealAeadSync(
   checkInputs(key, nonce);
   const associated = aad ?? EMPTY;
   const native = activeNative();
-  if (native === null) return xchacha20poly1305(key, nonce, associated).encrypt(plaintext);
+  if (native === null) return nobleCipher(key, nonce, associated).encrypt(plaintext);
   return nativeSeal(native, key, nonce, plaintext, associated);
 }
 
