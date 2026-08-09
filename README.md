@@ -1216,6 +1216,18 @@ state, but that is a hypothesis and not something measured here. The AC column
 was taken during 0.3.4 and the classical half has not changed since, so it should
 still be close, but treat it as indicative rather than fresh.
 
+**Two harnesses disagree about the battery figure and neither is being hidden.**
+The 5.256 ms above came from the README harness. The chart further down says
+**4.44 ms**, from a longer run: 20 rounds of 2000 iterations with a 25 second
+sustained warmup, phase separated so the handshake loop does not run immediately
+before the seal loop, and reporting the median of per-round p50 rather than a
+single pass. The longer run is the better number and the chart carries it. Both
+are printed here because the 18 percent gap between two honest measurements of
+one unchanged binary on one machine is itself the most useful fact in this
+section: it is the width of the error bar on every millisecond in this file.
+Ratios taken inside a single interleaved process, like the Signal comparison
+above, do not carry that error and are the ones worth quoting.
+
 An invite token is 1687 characters and an accept token is 3186, both fixed,
 because ML-KEM-768 keys and ciphertexts are fixed size. The handshake is roughly
 100 to 175 messages' worth of CPU depending on power state, and you pay it once,
@@ -1257,23 +1269,32 @@ the legend says which is which. A hatched bar is a number from a different
 version of this library and is not comparable to the solid one.
 
 The size of the lie, measured: the 7530U row said **7.6 ms** on 0.2.0. The same
-laptop on 0.3.4 does **1.85 ms**. The inherited handshake column overstates by
-roughly **4x**. The inherited `seal` column is wrong by an amount I cannot
-state, because those runs did not record their payload size.
+laptop on 0.4.0 does **4.44 ms on battery** and did **1.85 ms plugged in** on
+0.3.4, and the classical half of the handshake has not changed between those two
+versions. So the inherited handshake column overstates by somewhere between
+**1.7x and 4x**, and which end of that range you land on is decided by a power
+cable rather than by any code in this repository. The inherited `seal` column is
+wrong by an amount I cannot state at all, because those runs did not record
+their payload size.
+
+That range is the honest form of the correction and the single number that used
+to sit here was not. It is also the reason the generator now demands a `power`
+field on every row and refuses to draw one without it: version and date were
+never enough to make two bars comparable.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 1.85 (v0.3.4, measured), Apple M1 6.20 (v0.1.0, pre-0.3.3), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3). Only the Ryzen 5 7530U row is measured on 0.3.4; the rest predate the native curve and hash backends added in 0.3.3. The same laptop measured 7.6 ms on 0.2.0 and 1.85 ms on 0.3.4, so the inherited rows overstate the handshake by roughly 4x." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3, power state not recorded). Only the Ryzen 5 7530U row is measured on 0.4.0. Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured row mixes version, backend and CPU clock together and is not a clean hardware ranking. Absolute milliseconds on the measured row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M1 0.0190 (v0.1.0, pre-0.3.3), Ryzen 5 7530U 0.0201 (v0.3.4, measured), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3). Only the Ryzen 5 7530U row is measured on 0.3.4; the rest predate the native curve and hash backends added in 0.3.3. The inherited rows did not record their payload size, so they are not directly comparable to the 256 B measured row." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M1 0.0190 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3, power state not recorded). Only the Ryzen 5 7530U row is measured on 0.4.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured row. Absolute milliseconds on the measured row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
 </picture>
 
 | Machine | Node | Version | Handshake | `seal` | `open` |
 |---|---|---|---|---|---|
-| **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.3.4, measured 2026-08-08** | **1.85 ms** | **0.0201 ms** | **0.0180 ms** |
+| **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.4.0, measured 2026-08-08, on battery at 1890 MHz** | **4.44 ms** | **0.0355 ms** | **0.0292 ms** |
 | Apple M1 (laptop 2020, macOS) | not recorded | 0.1.0, inherited | 6.2 ms | 0.019 ms | not recorded |
 | Core i5-12500H (laptop 2022) | 24 | 0.2.0, inherited | 6.5 ms | 0.025 ms | not recorded |
 | Core i5-12450H (laptop 2022) | 24 | 0.2.0, inherited | 7.0 ms | 0.023 ms | not recorded |
@@ -1302,7 +1323,9 @@ The two 12th generation Intel rows are different chips, not one box measured twi
 
 The two i5-10400F rows are the same physical box under WSL and under Windows, with different Node versions: the handshake differs by 6 percent, `seal` is 21 percent faster on the Windows run. For scale, three back-to-back runs on the idle VPS varied by 3.3 percent on both handshake and `seal`, so single-digit gaps are run-to-run noise and only the larger one is worth a second look. `keygen` on that same VPS spread 33 percent across the three runs, which is what a noisy neighbour on shared hardware looks like and the reason `--runs` prints the spread at all.
 
-The 7530U row has been wrong twice and this is the third value it has held. It first went in at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it was 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. On 0.3.0 with a normal desktop load it read 8.9 ms handshake, 0.041 ms `seal`, 0.046 ms `open`. On 0.3.4 with native curve and hash backends it is 1.85 ms. Three of those four numbers were in this file at some point as if they were the truth. A bench number is only as good as the machine was quiet and the version it was measured on, which is why the generator now refuses to draw any row that does not carry a version and a date.
+The 7530U row has been wrong twice and this is the third value it has held. It first went in at 13.8 ms, measured while that laptop was running a heavy build in the background. Re-measured idle on 0.2.0 it was 7.6 ms with a 0.3 percent spread across three runs, which moved it from last place to fourth. On 0.3.0 with a normal desktop load it read 8.9 ms handshake, 0.041 ms `seal`, 0.046 ms `open`. On 0.3.4 with native curve and hash backends, plugged in, it was 1.85 ms. On 0.4.0 on battery at 1890 MHz it is 4.44 ms. Four of those five numbers were in this file at some point as if they were the truth, and the fifth is in it now. A bench number is only as good as the machine was quiet, the version it ran on, and the clock the CPU was actually holding, which is why the generator refuses to draw any row missing a version, a date or a power state.
+
+Worth saying plainly, because it is the most useful thing this row teaches: **the spread between 1.85 ms and 4.44 ms on one unchanged machine is larger than the spread between most of the eight machines in the chart.** Anyone quoting a millisecond off this project without saying whether the laptop was on mains is quoting noise.
 
 Protocol overhead is the one column that does not depend on the machine at all. Token overhead for a 256 byte message is **+259 bytes** (ratchet header + AEAD tag + framing) everywhere, because it is protocol math, not hardware, and it re-measures to exactly 259 on 0.3.4. That 259 is not a constant across sizes: the body is base64url, so a third of it scales with the plaintext, and a 65519 byte message pays 22013 bytes. The binary envelope overhead **is** constant, 122 bytes at any size, re-measured on 0.3.4 at 20, 100, 200, 256, 1000 and 4000 bytes, so a 256 byte message is a 378 byte envelope.
 
@@ -1343,7 +1366,7 @@ to 1539:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/wire-dark.svg">
-  <img src="bench/charts/wire-light.svg" alt="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 string workaround 2227 bytes, 0.2.0 sealBytes, native Uint8Array 1539 bytes, 31 percent fewer. Exact byte counts, not timings, measured against the published tarballs." width="760">
+  <img src="bench/charts/wire-light.svg" alt="Bytes on the wire for a 1 KiB binary payload: 0.1.0 latin1 string workaround 2227 bytes, 0.2.0 sealBytes, native Uint8Array 1539 bytes, 31 percent fewer. Exact byte counts, not timings, measured against the published tarballs, so they do not depend on CPU clock or power state." width="760">
 </picture>
 
 It also made a session survivable. On 0.1.0, `JSON.stringify` on a session
