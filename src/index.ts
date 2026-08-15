@@ -13,6 +13,7 @@
  */
 
 import type {
+  PrekeySecrets,
   EnvelopeBytes,
   EnvelopeToken,
   Fingerprint,
@@ -29,6 +30,7 @@ import { decodeEnvelope, encodeEnvelope } from './envelope.js';
 import { fail } from './errors.js';
 import { acceptInvite, beginInvite, completeInvite } from './handshake.js';
 import { createIdentity, fingerprint, publicOf, sameIdentity } from './identity.js';
+import { openIntro } from './prekeys.js';
 import {
   ratchetDecrypt,
   ratchetDecryptBytes,
@@ -128,7 +130,12 @@ async function engineOpenFromEnvelopeBytes(
 async function engineOpen(
   self: IdentityKeyPair,
   token: EnvelopeToken,
-  context: { session?: SessionState; pending?: PendingSession },
+  context: {
+    session?: SessionState;
+    pending?: PendingSession;
+    prekeys?: PrekeySecrets;
+    seenConversationIds?: Set<string>;
+  },
 ): Promise<OpenResult> {
   const payload = decodeEnvelope(token);
 
@@ -158,6 +165,21 @@ async function engineOpen(
         session,
         peerFingerprint: fingerprint(session.peer),
       };
+    }
+
+    case 'intro': {
+      // Both are required, and neither has a default. Without the secrets there
+      // is nothing to decapsulate with; without the seen set there is no replay
+      // protection at all, and quietly substituting an empty one would make the
+      // second delivery of a recorded intro open exactly like the first.
+      const prekeys = context.prekeys;
+      if (!prekeys) fail('no_session', 'no prekey secrets loaded, so an offline intro cannot be opened');
+      const seen = context.seenConversationIds;
+      if (!seen) {
+        fail('no_session', 'openIntro needs the set of conversation ids already opened, to refuse a replayed intro');
+      }
+      const session = openIntro(self, prekeys, payload, seen);
+      return { outcome: 'intro', session, peerFingerprint: fingerprint(payload.sender) };
     }
 
     case 'message': {
@@ -221,6 +243,18 @@ export function ratchetSnapshot(session: SessionState, label: string): RatchetSn
 
 export { isCryptoFailure, CryptoFailureError } from './errors.js';
 export { fingerprint, publicOf, sameIdentity } from './identity.js';
+/**
+ * The offline path. Deliberately not folded into `engine`, for the same reason
+ * the binary codec is not: `engine` is the state machine two live peers drive,
+ * and these three are about a conversation that starts with only one person
+ * present. Keeping them separate means a caller that never wants offline
+ * delivery does not have to think about prekey rotation or a replay set.
+ *
+ * `engine.open` still handles an inbound intro token, because a caller receiving
+ * a token genuinely cannot know which kind it is until it decodes it, which is
+ * the whole argument for `open` having one entry point.
+ */
+export { openIntro, publishPrekeys, sealIntro, verifyBundle } from './prekeys.js';
 export { MAX_SKIP } from './ratchet.js';
 export { ENVELOPE_VERSION, decodeEnvelope, encodeEnvelope } from './envelope.js';
 /**

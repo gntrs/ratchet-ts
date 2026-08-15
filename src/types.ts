@@ -108,7 +108,7 @@ export interface Fingerprint {
 // Wire format
 // ---------------------------------------------------------------------------
 
-export type EnvelopeKind = 'invite' | 'accept' | 'message';
+export type EnvelopeKind = 'invite' | 'accept' | 'message' | 'intro';
 
 /**
  * What actually gets pasted into a chat, or anywhere else.
@@ -218,7 +218,78 @@ export interface MessagePayload {
   readonly ciphertext: Uint8Array;
 }
 
-export type EnvelopePayload = InvitePayload | AcceptPayload | MessagePayload;
+/**
+ * The offline path, added in 0.6.0. One frame that carries a whole handshake,
+ * so the recipient does not have to be running anything when it is sent.
+ *
+ * It is large: identity, ephemeral, KEM ciphertext, ratchet key, both prekeys
+ * it was addressed to, and a signature. That is the price of not having a round
+ * trip, it is paid once per conversation, and the messages after it are the
+ * same 34 byte envelopes as any other conversation.
+ */
+export interface IntroPayload {
+  readonly kind: 'intro';
+  readonly conversationId: string;
+  readonly sender: PublicIdentity;
+  /**
+   * Single use X25519 key whose secret is wiped before the frame is built.
+   *
+   * This is what gives the offline path the initiator side forward secrecy the
+   * live handshake does not have. Recording this frame and stealing the
+   * sender's identity file afterwards does not recover the root key, because
+   * the other half of DH1 and DH3 stopped existing before the bytes were sent.
+   */
+  readonly ephemeralPublic: Uint8Array;
+  /** ML-KEM-768 encapsulation to the recipient's PQ prekey. */
+  readonly kemCiphertext: Uint8Array;
+  /** Sender's first ratchet public key. */
+  readonly ratchetPublic: Uint8Array;
+  /**
+   * The prekeys this frame was addressed to, echoed back.
+   *
+   * Signed, so an attacker holding two of a recipient's published bundles
+   * cannot swap one for the other and steer a sender onto a prekey whose secret
+   * they have recovered. Also what lets the recipient say "that is a prekey I
+   * have rotated away from" instead of failing an AEAD tag three layers later.
+   */
+  readonly prekeyClassical: Uint8Array;
+  readonly prekeyPq: Uint8Array;
+  readonly signature: Uint8Array;
+}
+
+/**
+ * What a recipient publishes so that people can write to them while they are
+ * offline. Safe to put anywhere: it is all public keys and a signature over
+ * them.
+ */
+export interface PrekeyBundle {
+  readonly identity: PublicIdentity;
+  /** X25519 prekey. Rotate by calling publishPrekeys again. */
+  readonly prekeyClassical: Uint8Array;
+  /** ML-KEM-768 prekey, the post-quantum arm of the offline handshake. */
+  readonly prekeyPq: Uint8Array;
+  /** ISO 8601. Inside the signature, so a host cannot back-date a bundle. */
+  readonly createdAt: string;
+  /** ML-DSA-65 over the identity, both prekeys and the timestamp. */
+  readonly signature: Uint8Array;
+}
+
+/**
+ * The half of a published bundle that never leaves the device.
+ *
+ * Carries the public halves too, so that `openIntro` can tell "addressed to a
+ * prekey I have rotated away from" apart from "addressed to me and corrupt",
+ * without the caller having to keep the bundle alongside it.
+ */
+export interface PrekeySecrets {
+  readonly prekeyClassicalSecret: Uint8Array;
+  readonly prekeyClassicalPublic: Uint8Array;
+  readonly prekeyPqSecret: Uint8Array;
+  readonly prekeyPqPublic: Uint8Array;
+  readonly createdAt: string;
+}
+
+export type EnvelopePayload = InvitePayload | AcceptPayload | MessagePayload | IntroPayload;
 
 // ---------------------------------------------------------------------------
 // AEAD backend
@@ -348,6 +419,22 @@ export type OpenResult =
       readonly outcome: 'accepted';
       readonly session: SessionState;
       readonly peerFingerprint: Fingerprint;
+    }
+  | {
+      /**
+       * An offline intro arrived: a whole handshake in one frame, sent while
+       * this device was not running. The session is live and can already
+       * receive, and the message that came with it is a separate token the
+       * caller opens with this session.
+       *
+       * Deliberately a different outcome from 'invite'. They look similar and
+       * they are not: an invite is a request to reply, an intro is a completed
+       * handshake somebody performed without us, and a UI that treated them the
+       * same would offer to send an accept that nobody is waiting for.
+       */
+      readonly outcome: 'intro';
+      readonly session: SessionState;
+      readonly peerFingerprint: Fingerprint;
     };
 
 /**
@@ -411,6 +498,15 @@ export interface MessagingEngine {
     context: {
       session?: SessionState;
       pending?: PendingSession;
+      /**
+       * Needed only to open an offline `intro`. Both prekey fields are required
+       * together: without the secrets there is nothing to decapsulate with, and
+       * without the seen set there is no replay protection, so neither has a
+       * default and leaving either out is an error that says which.
+       */
+      prekeys?: PrekeySecrets;
+      /** Conversation ids already opened. Mutated on success. */
+      seenConversationIds?: Set<string>;
     },
   ): Promise<OpenResult>;
 
