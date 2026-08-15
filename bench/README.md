@@ -6,14 +6,26 @@ spread column, and a header line naming the machine.
 ```
 npm run bench          # primitives: keygen, handshake, seal, open
 npm run bench:wire     # the wire: bytes, AEAD backends, handshake split
+npm run bench:machine  # one publishable row for the charts, takes a few minutes
 ```
 
-Both take `--runs N`. One run is already a median over many operations.
-Repeating the whole run catches the other kind of noise, the machine that is
-quiet for two seconds and busy for the next two. Spread is the gap between the
-fastest and slowest run as a share of the median. Under 10 percent the machine
-was quiet. Over 25 percent something else was using the CPU and the numbers are
-worth less.
+The first two take `--runs N`; `bench:machine` takes `--rounds N`. One run is
+already a median over many operations. Repeating the whole run catches the other
+kind of noise, the machine that is quiet for two seconds and busy for the next
+two. Spread is the gap between the fastest and slowest run as a share of the
+median. Under 10 percent the machine was quiet. Over 25 percent something else
+was using the CPU and the numbers are worth less.
+
+`bench/machine.mjs` is the one to run if you want to add your machine to the
+charts in the README, and it is the only one whose output is meant to be
+published next to somebody else's. It costs a few minutes rather than a few
+seconds, and it spends them on the things that turned out to matter: a 25 second
+sustained warmup, an idle gap and a re-warm burst between phases, and a median of
+per-round p50 rather than one long distribution. It prints a row you paste
+straight into `bench/charts/generate.mjs`, and it refuses to recommend the run if
+the spread says the machine was busy. Before it existed, the method behind the
+published row lived only as a sentence in the README, which meant the one number
+presented as reproducible was the one nobody could reproduce.
 
 `bench/bench.mjs` is the older script and it times primitives in isolation.
 `bench/wire.mjs` is this document's subject. It runs a real transfer over a real
