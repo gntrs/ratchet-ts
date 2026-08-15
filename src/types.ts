@@ -62,15 +62,30 @@ export interface IdentityKeyPair {
   /** X25519 classical half. */
   readonly classicalPublic: Uint8Array;
   readonly classicalSecret: Uint8Array;
-  /** ML-KEM-768 post-quantum half. */
+  /** ML-KEM-768 post-quantum half, for confidentiality. */
   readonly pqPublic: Uint8Array;
   readonly pqSecret: Uint8Array;
+  /**
+   * ML-DSA-65 signing half, for authenticity. Added in 0.6.0.
+   *
+   * The KEM half above defeats harvest-now-decrypt-later: a recorded session
+   * cannot be read once a quantum computer exists. It does nothing about an
+   * adversary standing in the middle of a LIVE handshake, because until 0.6.0
+   * the only thing binding a handshake to an identity was X25519, and an
+   * adversary who can break X25519 can produce both sides of that binding. So
+   * confidentiality was post-quantum and authenticity was not, which is a
+   * strange pair of promises to ship together and the README said so.
+   */
+  readonly sigPublic: Uint8Array;
+  readonly sigSecret: Uint8Array;
 }
 
 /** The publishable half of an identity. Safe to paste anywhere. */
 export interface PublicIdentity {
   readonly classicalPublic: Uint8Array;
   readonly pqPublic: Uint8Array;
+  /** ML-DSA-65 verifying key. See IdentityKeyPair.sigPublic. */
+  readonly sigPublic: Uint8Array;
 }
 
 /**
@@ -124,6 +139,12 @@ export interface InvitePayload {
   readonly sender: PublicIdentity;
   /** Random id tying an accept back to its invite. */
   readonly conversationId: string;
+  /**
+   * ML-DSA-65 over the invite transcript. See `inviteTranscript` in
+   * handshake.ts for exactly what is covered and why replay is handled
+   * elsewhere rather than here.
+   */
+  readonly signature: Uint8Array;
 }
 
 export interface AcceptPayload {
@@ -134,6 +155,12 @@ export interface AcceptPayload {
   readonly kemCiphertext: Uint8Array;
   /** Responder's first ratchet public key. */
   readonly ratchetPublic: Uint8Array;
+  /**
+   * ML-DSA-65 over the accept transcript, which includes the initiator's whole
+   * identity. That binding is what stops a quantum adversary from accepting an
+   * invite in somebody else's name.
+   */
+  readonly signature: Uint8Array;
 }
 
 /**
@@ -335,7 +362,8 @@ export type CryptoFailureReason =
   | 'authentication_failed'
   | 'replay_detected'
   | 'skip_limit_exceeded'
-  | 'identity_mismatch';
+  | 'identity_mismatch'
+  | 'bad_signature';
 
 export interface CryptoFailure {
   readonly reason: CryptoFailureReason;

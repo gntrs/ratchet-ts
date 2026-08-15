@@ -115,16 +115,16 @@ test('malformed input maps to a reason and never escapes as a raw exception', as
     { token: '', reason: 'malformed_token' },
     { token: 'garbage', reason: 'malformed_token' },
     { token: 'hello world, no dots here', reason: 'malformed_token' },
-    { token: 'OCX2.message', reason: 'malformed_token' },
-    { token: 'OCX2.message.', reason: 'malformed_token' },
-    { token: 'OCX2.bogus.AAAA', reason: 'malformed_token' },
-    { token: 'OCX2.message.not+valid/base64url==', reason: 'malformed_token' },
-    // 0x2c 0x00 0x00: a well formed packed header with the body cut off before
+    { token: 'OCX3.message', reason: 'malformed_token' },
+    { token: 'OCX3.message.', reason: 'malformed_token' },
+    { token: 'OCX3.bogus.AAAA', reason: 'malformed_token' },
+    { token: 'OCX3.message.not+valid/base64url==', reason: 'malformed_token' },
+    // 0x3c 0x00 0x00: a well formed packed header with the body cut off before
     // the session tag is complete.
-    { token: 'OCX2.message.LAAA', reason: 'malformed_token' },
+    { token: 'OCX3.message.PAAA', reason: 'malformed_token' },
     // All zero bytes: version nibble 0, which is a version problem and reported
     // as one even though the rest of the frame is nonsense too.
-    { token: 'OCX2.message.AAAAAAAA', reason: 'unknown_version' },
+    { token: 'OCX3.message.AAAAAAAA', reason: 'unknown_version' },
     { token: honest.slice(0, honest.length - 30), reason: 'malformed_token' },
     { token: 'OCX9.message.AAAA', reason: 'unknown_version' },
     // The reason the version was bumped: a 0.3.x peer's token is refused with

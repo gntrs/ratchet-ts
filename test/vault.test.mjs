@@ -143,7 +143,7 @@ test('an unprotected home says so in the file, and round trips', async () => {
     assert.ok(raw.includes('ratchet lock'), 'an unprotected file does not carry the fix');
     // The whole point of the `none` state is that it is honest, not that it is
     // safe: the secret really is readable, and the header really does say so.
-    assert.ok(payload.includes('OCX2.identity.'), 'a `none` file should hold the bare token');
+    assert.ok(payload.includes('OCX3.identity.'), 'a `none` file should hold the bare token');
 
     forgetCachedKey();
     const second = await loadIdentity();
@@ -160,7 +160,7 @@ test('a passphrase home seals the identity, and only that passphrase opens it', 
 
     const { raw, payload } = await identityParts();
     assert.ok(payload.startsWith('OCXV1.pass.'), `payload was ${payload.slice(0, 24)}`);
-    assert.ok(!raw.includes('OCX2.identity.'), 'the secret token is still in the clear');
+    assert.ok(!raw.includes('OCX3.identity.'), 'the secret token is still in the clear');
 
     forgetCachedKey();
     const second = await loadIdentity();
@@ -200,7 +200,7 @@ test('a keychain home seals the identity and never asks for anything', async (t)
 
     const { raw, payload } = await identityParts();
     assert.ok(payload.startsWith(`OCXV1.${state.protection}.`), `payload was ${payload.slice(0, 24)}`);
-    assert.ok(!raw.includes('OCX2.identity.'), 'the secret token is still in the clear');
+    assert.ok(!raw.includes('OCX3.identity.'), 'the secret token is still in the clear');
 
     forgetCachedKey();
     const second = await loadIdentity();

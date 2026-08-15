@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
+import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import type { SessionState } from '../src/contract.js';
@@ -42,8 +43,10 @@ interface Vectors {
   readonly seeds: {
     readonly aliceIdentityX25519: string;
     readonly aliceIdentityMlKem768: string;
+    readonly aliceIdentityMlDsa65: string;
     readonly bobIdentityX25519: string;
     readonly bobIdentityMlKem768: string;
+    readonly bobIdentityMlDsa65: string;
     readonly bobRatchet1X25519: string;
     readonly kemEncapsulationMsg: string;
     readonly aliceRatchet1X25519: string;
@@ -103,11 +106,63 @@ function fromHex(hex: string): Uint8Array {
 function deriveAll(v: Vectors) {
   const aliceClassical = x25519.keygen(fromHex(v.seeds.aliceIdentityX25519));
   const alicePq = ml_kem768.keygen(fromHex(v.seeds.aliceIdentityMlKem768));
+  const aliceSig = ml_dsa65.keygen(fromHex(v.seeds.aliceIdentityMlDsa65));
   const bobClassical = x25519.keygen(fromHex(v.seeds.bobIdentityX25519));
   const bobPq = ml_kem768.keygen(fromHex(v.seeds.bobIdentityMlKem768));
+  const bobSig = ml_dsa65.keygen(fromHex(v.seeds.bobIdentityMlDsa65));
+
+  const alicePublic = {
+    classicalPublic: aliceClassical.publicKey,
+    pqPublic: alicePq.publicKey,
+    sigPublic: aliceSig.publicKey,
+  };
+  const bobPublic = {
+    classicalPublic: bobClassical.publicKey,
+    pqPublic: bobPq.publicKey,
+    sigPublic: bobSig.publicKey,
+  };
 
   const bobRatchet1 = x25519.keygen(fromHex(v.seeds.bobRatchet1X25519));
   const kem = ml_kem768.encapsulate(alicePq.publicKey, fromHex(v.seeds.kemEncapsulationMsg));
+
+  // Rebuilt here rather than imported from src/handshake, which does not export
+  // it. That is the point of this file: if the transcript construction in the
+  // library drifts from what is written down here, the signature stops matching
+  // the recorded token and this fails, instead of both sides drifting together.
+  const transcript = (domain: string, parts: Uint8Array[]): Uint8Array => {
+    const lengths = new Uint8Array(4 * parts.length);
+    const view = new DataView(lengths.buffer);
+    parts.forEach((part, i) => view.setUint32(i * 4, part.length, false));
+    return concat(utf8ToBytes(domain), lengths, ...parts);
+  };
+  // Deterministic mode, because the library signs hedged and a hedged signature
+  // is different every time. What is pinned is the transcript and the encoding.
+  const signFixed = (msg: Uint8Array, secretKey: Uint8Array): Uint8Array =>
+    ml_dsa65.sign(msg, secretKey, { extraEntropy: false });
+
+  const inviteSignature = signFixed(
+    transcript('OCX2 invite transcript v1', [
+      utf8ToBytes(v.conversationId),
+      alicePublic.classicalPublic,
+      alicePublic.pqPublic,
+      alicePublic.sigPublic,
+    ]),
+    aliceSig.secretKey,
+  );
+  const acceptSignature = signFixed(
+    transcript('OCX2 accept transcript v1', [
+      utf8ToBytes(v.conversationId),
+      alicePublic.classicalPublic,
+      alicePublic.pqPublic,
+      alicePublic.sigPublic,
+      bobPublic.classicalPublic,
+      bobPublic.pqPublic,
+      bobPublic.sigPublic,
+      kem.cipherText,
+      bobRatchet1.publicKey,
+    ]),
+    bobSig.secretKey,
+  );
 
   // Responder-side mixing, exactly as acceptInvite orders it: identity DH,
   // ratchet DH, KEM secret.
@@ -150,8 +205,14 @@ function deriveAll(v: Vectors) {
   return {
     aliceClassical,
     alicePq,
+    aliceSig,
+    alicePublic,
     bobClassical,
     bobPq,
+    bobSig,
+    bobPublic,
+    inviteSignature,
+    acceptSignature,
     bobRatchet1,
     aliceRatchet1,
     bobRatchet2,
@@ -200,17 +261,19 @@ test('vectors: root evolution and the first three message keys each direction re
 test('vectors: all four wire tokens re-encode byte for byte', () => {
   const invite = encodeEnvelope({
     kind: 'invite',
-    sender: { classicalPublic: derived.aliceClassical.publicKey, pqPublic: derived.alicePq.publicKey },
+    sender: derived.alicePublic,
     conversationId: vectors.conversationId,
+    signature: derived.inviteSignature,
   });
   assert.equal(invite, vectors.tokens.invite);
 
   const accept = encodeEnvelope({
     kind: 'accept',
-    sender: { classicalPublic: derived.bobClassical.publicKey, pqPublic: derived.bobPq.publicKey },
+    sender: derived.bobPublic,
     conversationId: vectors.conversationId,
     kemCiphertext: derived.kem.cipherText,
     ratchetPublic: derived.bobRatchet1.publicKey,
+    signature: derived.acceptSignature,
   });
   assert.equal(accept, vectors.tokens.accept);
 
@@ -275,7 +338,7 @@ test('vectors: the real ratchet opens the vector tokens', () => {
   const bobSession: SessionState = {
     conversationId: vectors.conversationId,
     role: 'responder',
-    peer: { classicalPublic: derived.aliceClassical.publicKey, pqPublic: derived.alicePq.publicKey },
+    peer: derived.alicePublic,
     rootKey: derived.handshakeRootKey,
     selfRatchetPublic: derived.bobRatchet1.publicKey,
     selfRatchetSecret: derived.bobRatchet1.secretKey,
@@ -300,7 +363,7 @@ test('vectors: the real ratchet opens the vector tokens', () => {
   const aliceSession: SessionState = {
     conversationId: vectors.conversationId,
     role: 'initiator',
-    peer: { classicalPublic: derived.bobClassical.publicKey, pqPublic: derived.bobPq.publicKey },
+    peer: derived.bobPublic,
     rootKey: derived.rootAfterAliceStep,
     selfRatchetPublic: derived.aliceRatchet1.publicKey,
     selfRatchetSecret: derived.aliceRatchet1.secretKey,
