@@ -88,9 +88,10 @@ What is honestly still missing, in the order it is worth doing:
 3. **Nothing is signed.** The handshake authenticates with X25519 only, so a
    quantum adversary cannot read a recorded session but could impersonate one
    live. Confidentiality is hybrid, authenticity is classical.
-4. **The safety words are 66 bits and the pair line is worth 33 against a
-   birthday attack.** Measured cost to grind a collision on this machine: about
-   49 core-hours. Fixable by showing both fingerprints instead of one pair hash.
+4. **The safety words are 66 bits each.** Fixed in 0.5.1: the line you compare
+   is now both fingerprints, so a machine in the middle needs two independent
+   second preimages at 2^66 rather than one birthday search at 2^33. Until then
+   it was one hash of the pair and worth about 49 core-hours to break.
 5. **No audit, no formal model, one author.**
 
 ## Why
@@ -205,8 +206,8 @@ ratchet chat --to 192.168.1.24:4477
 ```
 
 Type a line, press enter, it arrives. `/quit`, Ctrl-C or Ctrl-D ends it and both
-sides print how many messages moved. The same six safety words appear, and the
-same rule applies: compare them out loud.
+sides print how many messages moved. The same safety words appear, and the same
+rule applies: compare them out loud.
 
 A chat only pairs with another chat. Both ends open with an invite and settle
 the tiebreak between themselves, so `ratchet chat` will not talk to
@@ -221,18 +222,31 @@ hash) are all encrypted with the same ratchet the library exposes. It is a
 direct TCP connection between the two machines: no relay, no server, no account,
 nothing of yours in the middle.
 
-Both ends print two lines of six safety words the moment the handshake lands,
-before the bytes finish moving.
+Both ends print the safety words the moment the handshake lands, before the
+bytes finish moving.
 
 ```
   compare aloud  scan  fiber  black  abstract  cradle  struggle
+                 goat  window  faint  climb  gossip  process
   peer identity  derive  remain  trip  noise  bean  fix
 ```
 
-**Compare the `compare aloud` line out of band**, out loud or over a channel an
-attacker on this network does not control. That line belongs to the pair, so it
-reads the same on both screens, and matching words mean you are talking to the
-machine you think you are. Nobody checks this for you.
+**Compare both `compare aloud` rows out of band**, out loud or over a channel an
+attacker on this network does not control. Those two rows are the two identity
+fingerprints, six words each, printed in the same order on both screens, and
+matching words mean you are talking to the machine you think you are. Nobody
+checks this for you.
+
+Twelve words rather than six, and the extra six are the whole point. They used
+to be one hash of both identities, which sounds equivalent and is not: a machine
+in the middle picks the key it shows to each side, so it is not solving a
+preimage, it is grinding both sides until the two six word lines happen to
+agree. That is a birthday search over 66 bits, roughly 2^33, which is hours on
+rented hardware. Reading the fingerprints separately removes the second degree
+of freedom and leaves two independent 2^66 problems. There is no shorter honest
+version: any single line you can compare is a space an attacker gets the square
+root of, so about 132 bits has to reach the user somehow. Signal shows 60 digits
+for the same reason.
 
 The `peer identity` line names the **other** machine, so the two screens show
 different words there, and that is correct. It is the same six words that machine
@@ -826,11 +840,11 @@ of work on the list and it touches the protocol, not just the CLI.
 Its *authentication* is X25519 alone, so a quantum adversary standing in the
 middle of a live handshake is not stopped by the ML-KEM half. ML-DSA-65 signatures
 fix that at roughly 2 kB of identity and a fraction of a millisecond to verify.
-Separately, the pair line people are asked to compare is 66 bits, but because it
-hashes both identities together it is worth about 33 bits against a birthday
-attack, which is a couple of hours of desktop compute. Showing both fingerprints
-instead of one pair line makes that two independent 66 bit problems and costs
-nothing but screen space.
+The second half of this item shipped in 0.5.1 and is struck from the list. The
+pair line used to hash both identities together, which made it 66 bits against a
+preimage and about 33 against the birthday search a two sided attacker actually
+runs. It is now the two fingerprints printed separately, twelve words, two
+independent 2^66 problems. What remains here is the ML-DSA half.
 
 **Not on this list, deliberately.** Group chat, which is a different protocol
 (MLS) and not a feature of this one. A nickname directory, which requires a server

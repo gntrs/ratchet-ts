@@ -8,7 +8,7 @@
  *
  * The six safety words exist so two people can catch a machine in the middle by
  * reading them aloud. That check only works the first time unless something
- * remembers the answer. Without a store, a user can verify six words with
+ * remembers the answer. Without a store, a user can verify the safety words with
  * someone on Monday, get an entirely different peer on Tuesday, and see no
  * difference at all on screen: the words are printed, they are different, and
  * nobody remembers Monday's. That is precisely the attack the fingerprint was

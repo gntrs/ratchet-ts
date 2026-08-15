@@ -451,6 +451,46 @@ function styler(useColor) {
  * colour, and that is deliberate: they are the only thing on screen the user
  * has a job to do about.
  */
+/**
+ * How many words one identity fingerprint contributes, and therefore how many
+ * go on one display row. Tied to FINGERPRINT_WORDS in src/identity.ts. It is a
+ * presentation constant rather than a derivation, which is why it can live in
+ * this module without violating the one-copy rule cli/protocol.mjs states over
+ * pairWords: nothing here computes a fingerprint, it only groups one.
+ */
+const WORDS_PER_LINE = 6;
+
+/**
+ * The safety words split into the fingerprints they are, one per row.
+ *
+ * cli/protocol.mjs builds the comparison string by concatenating both identity
+ * fingerprints, twelve words in a fixed order. Twelve words on one row is about
+ * 84 columns before any label, so it wraps on an 80 column terminal, and a
+ * safety word broken across a wrap is the one rendering failure this tool
+ * cannot afford: it still looks like a word and it will still get read aloud.
+ *
+ * The break is on the fingerprint boundary and never on available width. Two
+ * people comparing are not looking at the same window size, and a break that
+ * moved with the terminal would put the same twelve words in different shapes
+ * on the two screens, which is exactly the doubt the ritual exists to remove.
+ *
+ * Takes the string, not the identities, because every caller already has the
+ * string: it arrives with the handshake announcement and is held in UI state.
+ * This module imports nothing on purpose, and reaching for protocol.mjs here
+ * would pull the whole crypto engine into a pure renderer.
+ */
+export function splitPairWords(str) {
+  const all = String(str)
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 0);
+  const lines = [];
+  for (let at = 0; at < all.length; at += WORDS_PER_LINE) {
+    lines.push(all.slice(at, at + WORDS_PER_LINE).join(' '));
+  }
+  return lines.length > 0 ? lines : [''];
+}
+
 export function safetyWords(str, st) {
   return String(str)
     .trim()
@@ -511,7 +551,7 @@ export function glyphs(ascii) {
  * a command in the footer that the parser has never heard of.
  */
 export const COMMANDS = [
-  { name: '/verify', desc: 'compare the six words aloud and record this peer' },
+  { name: '/verify', desc: 'compare the safety words aloud and record this peer' },
   { name: '/peer', desc: 'who is on the other end, and since when' },
   { name: '/words', desc: 'reprint both fingerprint lines into the transcript' },
   { name: '/stats', desc: 'counts and timings for this session' },
@@ -604,7 +644,13 @@ const WHO_FIELD = {
 const GUTTER = 14;
 
 const INPUT_ROWS = 3;
-const STRIP_ROWS = 2;
+// One row per fingerprint plus the hint. It was 2 while the strip carried a
+// single six word line; the twelve words are drawn as two rows and this is the
+// number verificationStrip actually returns in both its branches. The frame is
+// clipped to plan.rows at the end, so a strip that returns more rows than are
+// budgeted for it does not overflow, it silently pushes the input box off the
+// bottom of the terminal.
+const STRIP_ROWS = 3;
 export const MAX_COMPLETION_ROWS = 5;
 
 function wantsStrip(s) {
@@ -830,24 +876,35 @@ function windowOf(rows, height, scroll) {
 }
 
 /**
- * Two rows above the input box while the peer is unverified, and zero rows the
+ * Rows above the input box while the peer is unverified, and zero rows the
  * moment it is. It is the only part of the chrome that grows, and it grows
  * exactly where a user who has not done their one job will be looking.
  *
- * The six words are never clipped. Everything else in this file gets cut to
+ * The safety words are never clipped. Everything else in this file gets cut to
  * fit; a safety word cut in half is worse than useless because it still looks
  * like a word and it will still get read aloud. When the row is too narrow to
  * carry the label and the words together, the label shrinks and the words move
- * to the second row on their own.
+ * to a row of their own.
+ *
+ * The words arrive as the two fingerprints and are drawn one per row, in the
+ * order cli/protocol.mjs fixed. Reflowing them to fit the terminal would put
+ * the break in a different place on a different window size, and the two people
+ * comparing are not looking at the same window size.
  */
 function verificationStrip(s, st, cols) {
-  const words = safetyWords(s.sessionWords || 'no words', st);
-  const wide = ` ${st.yellow('!')} ${st.dim('compare aloud')}   ${words}`;
-  const hint = st.dim('read these six words to the other person out loud. /verify when they match.');
-  if (stringWidth(wide) <= cols && stringWidth(`   ${hint}`) <= cols) {
-    return [pad(wide, cols), pad(`   ${hint}`, cols)];
+  const lines = splitPairWords(s.sessionWords || 'no words');
+  const drawn = lines.map((line) => safetyWords(line, st));
+  const label = ` ${st.yellow('!')} ${st.dim('compare aloud')}   `;
+  const indent = ' '.repeat(stringWidth(label));
+  const hint = st.dim('read these words to the other person out loud. /verify when they match.');
+  const wide = [label + drawn[0], ...drawn.slice(1).map((d) => indent + d)];
+  if (wide.every((row) => stringWidth(row) <= cols) && stringWidth(`   ${hint}`) <= cols) {
+    return [...wide.map((row) => pad(row, cols)), pad(`   ${hint}`, cols)];
   }
-  return [pad(` ${st.yellow('!')} ${st.dim('compare aloud, then /verify')}`, cols), pad(`   ${words}`, cols)];
+  return [
+    pad(` ${st.yellow('!')} ${st.dim('compare aloud, then /verify')}`, cols),
+    ...drawn.map((d) => pad(`   ${d}`, cols)),
+  ];
 }
 
 function inputRows(s, st, g, cols, height) {
@@ -979,7 +1036,7 @@ function g0(s) {
  *
  * There is no single keystroke in here that confirms anything. cli/chat.mjs
  * has carried that rule since /verify existed and the reasoning is in a
- * comment there: a verification is a human saying they compared six words out
+ * comment there: a verification is a human saying they compared the words out
  * loud with another human, and `y` is what a hand does while reading something
  * else. The whole word, typed, or nothing.
  */
@@ -1010,12 +1067,19 @@ function verifyModal(s, st, cols, height) {
   gap();
   keep(`  ${st.bold('verify this peer')}`);
   gap();
-  keep(`  ${st.dim('compare aloud')}   ${safetyWords(s.sessionWords || 'no words', st)}`);
+  {
+    // Two rows, one per fingerprint, the label on the first and the second
+    // indented under it. Both machines print these two rows identically and in
+    // this order, which is the only reason reading them aloud proves anything.
+    const lines = splitPairWords(s.sessionWords || 'no words');
+    keep(`  ${st.dim('compare aloud')}   ${safetyWords(lines[0], st)}`);
+    for (const line of lines.slice(1)) keep(`  ${' '.repeat(13)}   ${safetyWords(line, st)}`);
+  }
   keep(`  ${st.dim('peer identity')}   ${safetyWords(s.peerWords || 'no words', st)}`);
   gap();
-  prose('Read the top line out loud with the other person, on a call or in the same room. Not through this chat: an attacker who can rewrite the keys can rewrite the words too.');
+  prose('Read the two "compare aloud" rows out loud with the other person, on a call or in the same room. Not through this chat: an attacker who can rewrite the keys can rewrite the words too.');
   gap();
-  prose('If they read back the SAME six words, nobody is in the middle.');
+  prose('If they read back the SAME twelve words, in the same order, nobody is in the middle.');
   gap();
   // The answer is typed into the input box at the bottom, which is where the
   // hardware cursor already is. Echoing it a second time in the panel would put

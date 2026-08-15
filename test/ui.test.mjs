@@ -32,7 +32,9 @@ function base() {
   const s = blankState();
   s.color = false;
   s.peerAddress = '192.168.1.24:4477';
-  s.sessionWords = 'scan fiber black abstract cradle struggle';
+  // Twelve words, because that is what cli/protocol.mjs now produces: the two
+  // identity fingerprints concatenated, not a hash of the pair.
+  s.sessionWords = 'scan fiber black abstract cradle struggle goat window faint climb gossip process';
   s.peerWords = 'goat window faint climb gossip process';
   s.link = { state: 'live', pq: true, quietSeconds: 0 };
   s.transcript = [
@@ -97,19 +99,24 @@ test('steady state, verified peer: four rows of chrome and the rest is transcrip
   );
 });
 
-test('unverified: the strip takes two rows and the transcript loses exactly two', () => {
+test('unverified: the strip takes three rows and the transcript loses exactly three', () => {
   const rows = renderFrame(base(), SIZE);
   const verifiedRows = renderFrame(verified(), SIZE);
   assert.equal(rows.length, verifiedRows.length);
 
-  const strip = rows.slice(-6, -4);
+  // One row per fingerprint, then the hint. The second row is indented to sit
+  // under the first so the twelve words read as one block, and neither row is
+  // allowed to wrap: a safety word cut in half still looks like a word and will
+  // still get read aloud.
+  const strip = rows.slice(-7, -4);
   assert.deepEqual(strip.map((r) => r.trimEnd()), [
     ' ! compare aloud   scan  fiber  black  abstract  cradle  struggle',
-    '   read these six words to the other person out loud. /verify when they match.',
+    '                   goat  window  faint  climb  gossip  process',
+    '   read these words to the other person out loud. /verify when they match.',
   ]);
-  // The chrome grew by two, so the content region shrank by two and nothing
+  // The chrome grew by three, so the content region shrank by three and nothing
   // else moved.
-  assert.equal(layout(base(), SIZE).content, layout(verified(), SIZE).content - 2);
+  assert.equal(layout(base(), SIZE).content, layout(verified(), SIZE).content - 3);
 });
 
 test('the badge names the state in a word, so colour is never the only carrier', () => {
@@ -141,7 +148,7 @@ test('the verify modal asks a real question and names the only answer', () => {
   assert.match(text, /type {2}yes {2}and press enter/);
   assert.match(text, /Esc, or anything else, cancels/);
   // The strip is redundant while the modal is up: the modal is already showing
-  // the same six words, and two copies on one screen is two things to compare.
+  // the same words, and two copies on one screen is two things to compare.
   assert.equal(layout(s, SIZE).strip, 0);
   // The caret stays in the input box: the modal is a question, not a prompt.
   assert.ok(cursorPosition(s, SIZE));

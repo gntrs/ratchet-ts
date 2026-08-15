@@ -13,7 +13,7 @@
  * Until 0.4.0 this file held exportIdentity() output verbatim: both secret
  * halves, X25519 and ML-KEM-768, in base64url, with nothing in front of them.
  * Anyone who read it could impersonate the user forever and complete a
- * handshake as them with anyone who had not verified the six words out loud.
+ * handshake as them with anyone who had not verified the safety words out loud.
  * Forward secrecy does not help with that: it protects messages already sent,
  * not the identity that signs for the next ones.
  *
@@ -99,7 +99,7 @@ function header(protection) {
       '# ratchet identity. THIS FILE IS NOT ENCRYPTED.',
       '# It holds both halves of your long term secret key. Anyone who copies it',
       '# can be you: they can complete a handshake in your name with anyone who',
-      '# has not compared your six words out loud.',
+      '# has not compared your safety words out loud.',
       '# No keychain was reachable on this machine. To protect it with a',
       '# passphrase instead, run:  ratchet lock',
     ];

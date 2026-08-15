@@ -29,7 +29,7 @@ import {
   savePeers,
 } from '../cli/peers.mjs';
 import { FAILURE_CONTEXTS, explainError, explainFailure, pairWords, wrapCrypto } from '../cli/protocol.mjs';
-import { CryptoFailureError } from '../dist/index.js';
+import { CryptoFailureError, fingerprint, formatFingerprint } from '../dist/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -80,20 +80,57 @@ function storeWith(entries) {
 }
 
 // ---------------------------------------------------------------------------
-// The six words, pinned
+// The safety words, pinned
 // ---------------------------------------------------------------------------
 
-// These literals were computed from the derivation as it stood BEFORE
-// cli/chat.mjs stopped carrying its own copy of pairWords, and the two copies
-// were confirmed byte identical at that point. If this test ever fails, the
-// derivation moved, and every peer anybody has verified now shows different
-// words with no way to tell that from an attack. Fix the code, not the literal.
+// If this test ever fails, the derivation moved, and every peer anybody has
+// verified now shows different words with no way to tell that from an attack.
+// Fix the code, not the literal.
+//
+// The literal changed once, on 2026-08-15, when the derivation stopped hashing
+// the two identities together and started concatenating their fingerprints. The
+// old six word value was 'dumb engine cake curious area collect'. That was a
+// deliberate break and it is the only one: a combined hash gives a man in the
+// middle, who picks the key shown to each side, a birthday search at about 2^33
+// instead of a preimage at 2^66. Anyone who verified a peer before that date is
+// looking at twelve words where they used to see six, which is correct, because
+// what they checked before was worth half of what they were told.
 test('pairWords is pinned to a fixed pair of identities', () => {
-  assert.equal(pairWords(IDENTITY_A, IDENTITY_B), 'dumb engine cake curious area collect');
+  assert.equal(
+    pairWords(IDENTITY_A, IDENTITY_B),
+    'city harvest idle festival hello black true drastic card act novel erode',
+  );
 });
 
 test('pairWords does not depend on which side computes it', () => {
   assert.equal(pairWords(IDENTITY_B, IDENTITY_A), pairWords(IDENTITY_A, IDENTITY_B));
+});
+
+// The security property itself, not just a pinned string. The words have to BE
+// the two fingerprints, because that is what forces an attacker into two
+// independent second preimages rather than one collision search.
+test('pairWords is the two identity fingerprints, not a hash of the pair', () => {
+  const a = formatFingerprint(fingerprint(IDENTITY_A)).split(' ');
+  const b = formatFingerprint(fingerprint(IDENTITY_B)).split(' ');
+  const got = pairWords(IDENTITY_A, IDENTITY_B).split(' ');
+  assert.equal(got.length, a.length + b.length);
+  // Order is by fingerprint hex, so one of the two arrangements must match
+  // exactly. Both fingerprints appear whole and neither is mixed into the other.
+  const forward = [...a, ...b].join(' ');
+  const backward = [...b, ...a].join(' ');
+  assert.ok(got.join(' ') === forward || got.join(' ') === backward);
+});
+
+// A peer whose fingerprint is unchanged must not move the other peer's words.
+// If it did, the two sides could not compare position by position and the whole
+// construction would be back to a single blended value.
+test('changing one identity leaves the other identity words intact', () => {
+  const other = { classicalPublic: fill(32, 0x5c), pqPublic: fill(1184, 0x5d) };
+  const aWords = formatFingerprint(fingerprint(IDENTITY_A)).split(' ');
+  const got = pairWords(IDENTITY_A, other).split(' ');
+  const at = got.indexOf(aWords[0]);
+  assert.notEqual(at, -1);
+  assert.deepEqual(got.slice(at, at + aWords.length), aWords);
 });
 
 test('pairWords is defined exactly once in the CLI', async () => {
