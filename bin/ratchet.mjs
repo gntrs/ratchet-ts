@@ -20,8 +20,13 @@ import { basename, delimiter, dirname, extname, join, resolve } from 'node:path'
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { fingerprint, formatFingerprint, isCryptoFailure } from '../dist/index.js';
-import { connect, listen } from '../cli/frame.mjs';
+import { fingerprint, formatFingerprint, isCryptoFailure, publicOf } from '../dist/index.js';
+import { connect, connectViaRelay, listen } from '../cli/frame.mjs';
+import { newPairingCode, parsePairingCode, pinMatches } from '../cli/pairing.mjs';
+// The relay's own constants. Imported for the magic bytes and the default port
+// only; nothing in the client runs the server, and a client installed from npm
+// carries relay/server.mjs but never executes it.
+import { DEFAULT_PORT as RELAY_DEFAULT_PORT, RELAY_MAGIC } from '../relay/server.mjs';
 import {
   identityFile,
   loadIdentity,
@@ -304,7 +309,7 @@ function reportError(err) {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-const VALUE_FLAGS = new Set(['--port', '--out', '--to', '--text', '--chunk', '--label']);
+const VALUE_FLAGS = new Set(['--port', '--out', '--to', '--text', '--chunk', '--label', '--relay', '--code']);
 const BOOL_FLAGS = new Set(['--once', '--stats', '--json', '--help', '--version', '--reset', '--yes', '-h', '-v']);
 const ALIASES = { '-h': '--help', '-v': '--version' };
 
@@ -1054,7 +1059,68 @@ async function outDirectory(opts) {
   return outDir;
 }
 
+/**
+ * Receive over a relay instead of a listening socket.
+ *
+ * One code, one transfer, then a new code. A code that kept working would be a
+ * standing invitation on a public host, and the whole reason it is safe to
+ * paste one into a chat app is that it is spent the moment it is used.
+ */
+async function recvViaRelay(opts, relay) {
+  const outDir = await outDirectory(opts);
+  const identity = await openIdentity();
+  const myWords = formatFingerprint(fingerprint(identity));
+
+  let failures = 0;
+  for (;;) {
+    const { code, rendezvous } = newPairingCode(publicOf(identity));
+
+    say(
+      box('ratchet recv, over a relay', [
+        `you        ${words(myWords)}`,
+        `identity   ${color.dim(identityFile())}`,
+        `relay      ${color.dim(`${relay.host}:${relay.port}`)}`,
+        `saving to  ${color.dim(outDir)}`,
+      ]),
+    );
+    say('');
+    say(`  ${color.dim('give them this code:')}`);
+    say('');
+    say(`      ${color.bold(code)}`);
+    say('');
+    say(`  ${color.dim('and they run:')}`);
+    say(`      ${color.bold(`${cmd()} send FILE --code ${code} --relay ${relay.host}:${relay.port}`)}`);
+    say('');
+    say(color.dim('The code is good for one transfer. Ctrl-C to stop.'));
+
+    const channel = await dialRelay(relay, rendezvous, 'Waiting for them to join.');
+    let failed = null;
+    try {
+      await receiveOne({ channel, identity, outDir, opts });
+    } catch (err) {
+      failed = err;
+      reportError(err);
+    } finally {
+      await closeQuietly(channel);
+    }
+
+    if (opts.once) return failed ? (isCrypto(failed) ? 2 : 1) : 0;
+    if (failed) {
+      failures += 1;
+      // A crypto failure over a relay is somebody who joined the rendezvous and
+      // produced bytes that did not verify. The code is burnt either way, so
+      // the loop mints a new one, but this stops rather than handing an
+      // attacker a fresh code automatically.
+      if (isCrypto(failed)) return 2;
+    }
+    say('');
+  }
+}
+
 async function cmdRecv(opts) {
+  const relay = relayTarget(opts);
+  if (relay) return recvViaRelay(opts, relay);
+
   const port = opts.port === undefined ? DEFAULT_PORT : parsePort(opts.port, '--port');
   const outDir = await outDirectory(opts);
 
@@ -1230,6 +1296,61 @@ function echoTextMessage(name, bytes) {
   say(box('message', text.split('\n').map((line) => line.replace(ECHO_STRIP, ''))));
 }
 
+/**
+ * Where the relay is. A flag, then the environment, then nothing.
+ *
+ * There is deliberately no default host baked in. A default would mean every
+ * install of this tool quietly routes through one machine that somebody else
+ * runs, chosen by me rather than by the person whose traffic it is, and it
+ * would keep working after I stopped paying for it. Running `relay/server.mjs`
+ * costs about as much as a domain name, and the address belongs in the hands of
+ * whoever is trusting it for availability.
+ */
+function relayTarget(opts) {
+  const raw = opts.relay ?? process.env.RATCHET_RELAY ?? null;
+  if (!raw) return null;
+  const text = String(raw).trim();
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']');
+    if (end === -1) usageError(`--relay ${text} is missing a closing bracket`);
+    const host = text.slice(1, end);
+    const rest = text.slice(end + 1);
+    if (rest === '') return { host, port: RELAY_DEFAULT_PORT };
+    if (!rest.startsWith(':')) usageError(`--relay ${text} is not HOST or HOST:PORT`);
+    return { host, port: parsePort(rest.slice(1), '--relay port') };
+  }
+  const parts = text.split(':');
+  if (parts.length === 1) return { host: parts[0], port: RELAY_DEFAULT_PORT };
+  if (parts.length === 2) return { host: parts[0], port: parsePort(parts[1], '--relay port') };
+  usageError(`--relay ${text} is not HOST or HOST:PORT`);
+}
+
+/** Dial the relay and turn its refusals into sentences with a next step. */
+async function dialRelay({ host, port }, rendezvous, waitingMessage) {
+  if (waitingMessage) say(color.dim(waitingMessage));
+  try {
+    return await connectViaRelay({ host, port, rendezvous, magic: RELAY_MAGIC });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/nobody joined/.test(message)) {
+      return failWith(
+        'nobody joined this pairing code in time',
+        'Codes are for one meeting and they expire. Make a new one and send it over again.',
+      );
+    }
+    if (/full/.test(message)) {
+      return failWith(
+        `the relay at ${host}:${port} is full`,
+        'Try again in a moment, or point --relay at one with more room.',
+      );
+    }
+    return failWith(
+      `cannot reach the relay at ${host}:${port}`,
+      `Check the address, and that a relay is running there:  ${color.bold('node relay/server.mjs')}`,
+    );
+  }
+}
+
 /** Wraps connect() so every reason a connection fails ends with a fix. */
 async function dial(host, port) {
   try {
@@ -1277,14 +1398,63 @@ async function dial(host, port) {
   }
 }
 
+/**
+ * The pairing code check, run at the handshake and before one payload byte.
+ *
+ * This is the whole reason a code carries a fingerprint prefix. The rendezvous
+ * secret keeps strangers out of the socket, and it stops keeping them out the
+ * moment the code leaks: a code pasted into a group chat is a code somebody
+ * else can race the real receiver to. Comparing the 64 bits in the code against
+ * whoever actually answered turns that race into a dead end.
+ *
+ * onHandshake runs synchronously inside sendPayload, after the handshake and
+ * before the header is sealed, so throwing here aborts with nothing sent. That
+ * ordering is load bearing rather than incidental: a check that ran after the
+ * payload would be a report, not a defence.
+ */
+function pinnedGate(pin) {
+  return (event) => {
+    if (!pinMatches(pin, event.peerHex)) {
+      say('');
+      say(color.red('  STOP. The machine that answered is not the one this code was made for.'));
+      say('');
+      say(`  ${color.dim('the code expects an identity starting')}  ${color.bold(Buffer.from(pin).toString('hex'))}`);
+      say(`  ${color.dim('the machine that answered starts')}       ${color.bold(event.peerHex.slice(0, 16))}`);
+      say('');
+      say(color.dim('  Nothing was sent. Either the code went to the wrong person, or somebody'));
+      say(color.dim('  is sitting on the rendezvous. Get a fresh code over a channel they do not'));
+      say(color.dim('  control, and do not reuse this one.'));
+      const err = new Error('the peer does not match the pairing code');
+      err.hint = [];
+      throw err;
+    }
+  };
+}
+
 async function cmdSend(opts, rest) {
-  if (!opts.to) {
+  const relay = relayTarget(opts);
+  const usingCode = typeof opts.code === 'string';
+  if (usingCode && !relay) {
     usageError(
-      'send needs --to HOST or --to HOST:PORT',
+      '--code needs --relay HOST[:PORT] as well, or RATCHET_RELAY set',
+      'A code says WHO to meet. The relay is WHERE. There is no default relay on purpose:',
+      'see the note in the README about not routing everybody through one machine.',
+    );
+  }
+  if (!usingCode && !opts.to) {
+    usageError(
+      'send needs --to HOST or --to HOST:PORT, or --code CODE with --relay',
       `On the other machine run  ${color.bold(`${cmd()} recv`)}  and it prints the exact line to use.`,
     );
   }
-  const { host, port } = parseTo(opts.to);
+  if (usingCode && opts.to) usageError('give --code or --to, not both');
+
+  const parsedCode = usingCode ? parsePairingCode(opts.code) : null;
+  if (parsedCode && !parsedCode.ok) {
+    usageError(`that pairing code is not usable: ${parsedCode.reason}`, 'Ask them to read it out again.');
+  }
+
+  const { host, port } = usingCode ? { host: relay.host, port: relay.port } : parseTo(opts.to);
   const chunkSize = parseChunk(opts.chunk);
 
   const hasText = typeof opts.text === 'string';
@@ -1336,8 +1506,16 @@ async function cmdSend(opts, rest) {
   // The host as typed, without the port. The dialling side has no better handle
   // on where it is calling, and the port here is the listener's, not the peer's.
   const trust = await openTrust(host);
-  say(`Connecting to ${color.bold(`${host}:${port}`)}`);
-  const channel = await dial(host, port);
+
+  let channel;
+  if (parsedCode) {
+    say(`Meeting them at ${color.bold(`${relay.host}:${relay.port}`)} with code ${color.bold(parsedCode.code)}`);
+    channel = await dialRelay(relay, parsedCode.rendezvous, 'Waiting for them to be ready.');
+  } else {
+    say(`Connecting to ${color.bold(`${host}:${port}`)}`);
+    channel = await dial(host, port);
+  }
+  const where = parsedCode ? `relay ${relay.host}:${relay.port}` : `${host}:${port}`;
 
   try {
     const stats = await sendPayload({
@@ -1348,11 +1526,15 @@ async function cmdSend(opts, rest) {
       chunkSize,
       onProgress: makeProgress('sending'),
       onHandshake: handshakeBanner(trust),
+      // Separate from the banner on purpose: onHandshake cannot refuse, this
+      // can. See gateOnPeer in cli/protocol.mjs for what happened when the
+      // check lived in the banner.
+      ...(parsedCode ? { verifyPeer: pinnedGate(parsedCode.pin) } : {}),
     });
     clearProgress();
     await trust.commit();
-    renderResult({ verb: 'sent', name, stats, extra: `${host}:${port}`, showStats: Boolean(opts.stats) });
-    if (jsonMode) emit({ direction: 'sent', name, to: `${host}:${port}`, ...stats });
+    renderResult({ verb: 'sent', name, stats, extra: where, showStats: Boolean(opts.stats) });
+    if (jsonMode) emit({ direction: 'sent', name, to: where, ...stats });
     return 0;
   } finally {
     await closeQuietly(channel);
