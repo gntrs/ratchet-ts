@@ -74,10 +74,10 @@ const CONVERSATION_ID = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeaf';
 const SESSION_TAG = conversationIdToBytes(CONVERSATION_ID).subarray(0, SESSION_TAG_LEN);
 
 /** Byte 0 of a message envelope with and without the ratchet key. */
-const HEADER_PLAIN = 0x2c;
-const HEADER_STEP = 0x2e;
+const HEADER_PLAIN = 0x3c;
+const HEADER_STEP = 0x3e;
 /** Byte 0 and byte 1 of a handshake envelope, which kept the 0.3.x shape. */
-const HANDSHAKE_VERSION = 0x02;
+const HANDSHAKE_VERSION = 0x03;
 const TAG_INVITE = 0x01;
 const TAG_ACCEPT = 0x02;
 /** Poly1305, the floor under any sealed body. */
@@ -119,7 +119,8 @@ function sampleInvite(): InvitePayload {
   return {
     kind: 'invite',
     conversationId: CONVERSATION_ID,
-    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184) },
+    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
+    signature: randomBytes(3309),
   };
 }
 
@@ -127,9 +128,10 @@ function sampleAccept(): AcceptPayload {
   return {
     kind: 'accept',
     conversationId: CONVERSATION_ID,
-    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184) },
+    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
     kemCiphertext: randomBytes(1088),
     ratchetPublic: randomBytes(32),
+    signature: randomBytes(3309),
   };
 }
 
@@ -214,7 +216,7 @@ function join(...parts: readonly (number | Uint8Array)[]): Uint8Array {
  * The non-step message envelope, in full.
  *
  *   offset  size  field
- *   0       1     0x2c = [ver 0010][kind 11][hasRatchetKey 0][reserved 0]
+ *   0       1     0x3c = [ver 0011][kind 11][hasRatchetKey 0][reserved 0]
  *   1       4     session tag, first 4 bytes of the 16 byte conversation id
  *   5       1     message number as a canonical varint, 7 fits in one byte
  *   6       12    RFC 8439 nonce, random per seal, no length prefix
@@ -224,7 +226,7 @@ function join(...parts: readonly (number | Uint8Array)[]): Uint8Array {
  * which is 34.
  */
 const PIN_PLAIN =
-  '2c' +
+  '3c' +
   'a0a1a2a3' +
   '07' +
   'b0b1b2b3b4b5b6b7b8b9babb' +
@@ -255,7 +257,7 @@ test('a non-step message envelope is byte identical to its pin', () => {
  * The step message envelope, in full.
  *
  *   offset  size  field
- *   0       1     0x2e = [ver 0010][kind 11][hasRatchetKey 1][reserved 0]
+ *   0       1     0x3e = [ver 0011][kind 11][hasRatchetKey 1][reserved 0]
  *   1       4     session tag
  *   5       2     message number 300 as a varint: 0xac 0x02
  *   7       1     previous chain length 5 as a varint
@@ -267,7 +269,7 @@ test('a non-step message envelope is byte identical to its pin', () => {
  * varint byte, which is every message number below 128.
  */
 const PIN_STEP =
-  '2e' +
+  '3e' +
   'a0a1a2a3' +
   'ac02' +
   '05' +
@@ -308,7 +310,7 @@ test('byte 0 says version, kind and key presence, and nothing else', () => {
   assert.equal(encodeEnvelopeBytes(samplePlain(0))[0], HEADER_PLAIN);
   assert.equal(encodeEnvelopeBytes(sampleStep(0))[0], HEADER_STEP);
   for (const first of [HEADER_PLAIN, HEADER_STEP]) {
-    assert.equal(first >>> 4, 2, 'version nibble moved');
+    assert.equal(first >>> 4, 3, 'version nibble moved');
     assert.equal((first >>> 2) & 0x03, 3, 'kind bits moved');
     assert.equal(first & 0x01, 0, 'reserved bit is not zero');
   }
@@ -368,7 +370,7 @@ test('the string form is exactly base64url over the binary form', () => {
   for (const payload of samples()) {
     const token = encodeEnvelope(payload);
     const binary = encodeEnvelopeBytes(payload);
-    assert.ok(token.startsWith(`OCX2.${payload.kind}.`), `token ${token.slice(0, 20)} has the wrong prefix`);
+    assert.ok(token.startsWith(`OCX3.${payload.kind}.`), `token ${token.slice(0, 20)} has the wrong prefix`);
     // Re-encoding what the string form decodes must land on the same bytes the
     // binary form emits. If these ever diverge, one of the two encoders has
     // grown a field the other has not.
@@ -499,7 +501,7 @@ test('a non-minimal varint is rejected', () => {
   }
 
   // Zero padded is the same bug with the smallest value.
-  const zero = join(unhex('2ca0a1a2a3'), unhex('8000'), CIPHERTEXT_32);
+  const zero = join(unhex('3ca0a1a2a3'), unhex('8000'), CIPHERTEXT_32);
   assert.equal(
     failureOf(() => decodeEnvelopeBytes(zero)).message,
     'non-canonical varint, trailing zero group',
@@ -515,18 +517,18 @@ test('a non-minimal varint is rejected', () => {
 test('a varint longer than five bytes or past 2^32-1 is rejected', () => {
   // Six continuation bytes: the reader gives up at five rather than growing an
   // unbounded integer out of attacker bytes.
-  const long = join(unhex('2ca0a1a2a3'), unhex('808080808001'), CIPHERTEXT_32);
+  const long = join(unhex('3ca0a1a2a3'), unhex('808080808001'), CIPHERTEXT_32);
   assert.equal(failureOf(() => decodeEnvelopeBytes(long)).message, 'varint is longer than 5 bytes');
 
   // Five bytes, minimal, but 2^35 - a value the u32 counters it replaced could
   // never hold. Accepting it would mean the wire admits numbers the encoder
   // cannot produce.
-  const huge = join(unhex('2ca0a1a2a3'), unhex('8080808080'), CIPHERTEXT_32);
+  const huge = join(unhex('3ca0a1a2a3'), unhex('8080808080'), CIPHERTEXT_32);
   const failure = failureOf(() => decodeEnvelopeBytes(huge));
   assert.equal(failure.reason, 'malformed_token');
 
   // 0xffffffff is the largest that must still work, and it is exactly five bytes.
-  const max = join(unhex('2ca0a1a2a3'), unhex('ffffffff0f'), CIPHERTEXT_32);
+  const max = join(unhex('3ca0a1a2a3'), unhex('ffffffff0f'), CIPHERTEXT_32);
   assert.equal((decodeEnvelopeBytes(max) as MessagePayload).messageNumber, 0xffffffff);
 
   // The encoder refuses the same values from the other side, so a caller cannot
@@ -549,7 +551,7 @@ test('a varint longer than five bytes or past 2^32-1 is rejected', () => {
 
 test('a truncated varint is refused before it is read', () => {
   // Header byte, session tag, then a continuation byte with nothing after it.
-  const bad = unhex('2ca0a1a2a380');
+  const bad = unhex('3ca0a1a2a380');
   const failure = failureOf(() => decodeEnvelopeBytes(bad));
   assert.equal(failure.reason, 'malformed_token');
   assert.equal(failure.message, 'truncated varint');
@@ -576,7 +578,7 @@ test('the binary form is strictly smaller than the string form, ratio near 3/4',
       binary.length < text.length,
       `binary ${binary.length} is not smaller than text ${text.length}`,
     );
-    // 3/4 is the base64 ratio. The fixed "OCX2.<kind>." prefix drags it below
+    // 3/4 is the base64 ratio. The fixed "OCX3.<kind>." prefix drags it below
     // that, and the smaller the frame the more it drags, which is why the tight
     // bound lives in the next test instead of here.
     const ratio = binary.length / text.length;
@@ -587,7 +589,7 @@ test('the binary form is strictly smaller than the string form, ratio near 3/4',
 test('the ratio converges on 3/4 as the payload grows', () => {
   const big = samplePlain(65_519);
   const ratio = encodeEnvelopeBytes(big).length / encodeEnvelope(big).length;
-  // The fixed 13 char "OCX2.message." prefix is the only thing keeping this off
+  // The fixed 13 char "OCX3.message." prefix is the only thing keeping this off
   // 0.75 exactly, and at 64 KiB it is worth four ten thousandths.
   assert.ok(ratio > 0.7495 && ratio < 0.7505, `ratio ${ratio} did not converge on 3/4`);
 });
@@ -689,7 +691,7 @@ test('input that is not a byte array at all fails closed rather than throwing', 
   // library boundary where that stops being the caller's problem. null and
   // undefined used to escape as a raw TypeError out of `.length`, which broke
   // the promise the rest of this file spends 400 lines proving.
-  for (const notBytes of [null, undefined, 'OCX2.message.AAAA', 42, {}, [1, 2, 3]]) {
+  for (const notBytes of [null, undefined, 'OCX3.message.AAAA', 42, {}, [1, 2, 3]]) {
     const failure = failureOf(() => decodeEnvelopeBytes(notBytes as unknown as Uint8Array));
     assert.equal(failure.reason, 'malformed_token', `wrong reason for ${String(notBytes)}`);
   }
@@ -704,11 +706,18 @@ test('input that is not a byte array at all fails closed rather than throwing', 
   assert.deepEqual(decodeEnvelopeBytes(asBuffer), payload);
 });
 
-test('a 0.3.x frame fails as unknown_version, not as a mystery auth failure', () => {
-  // This is the entire reason the version was bumped from 0x01 to 0x02. A 0.3.x
-  // message envelope starts with 0x01 0x03; a 0.3.x handshake with 0x01 0x01.
-  // Both must land on "update your client".
-  for (const first of [0x00, 0x01, 0x03, 0x0f]) {
+test('an older frame fails as unknown_version, not as a mystery auth failure', () => {
+  // This is the entire reason the version was bumped from 0x01 to 0x02, and
+  // again to 0x03 when the handshake frames grew signatures. A 0.3.x message
+  // envelope starts with 0x01 0x03; a 0.3.x handshake with 0x01 0x01; a 0.5.x
+  // handshake with 0x02 0x01. All must land on "update your client".
+  //
+  // 0x03 used to be in this list as an obviously foreign byte and cannot be any
+  // more: it IS the current handshake version marker, so a frame starting with
+  // it is dispatched as a current handshake and refused on its kind tag
+  // instead. 0x02 replaced it, which is the more useful case anyway, because it
+  // is a real version somebody is running rather than a number nobody shipped.
+  for (const first of [0x00, 0x01, 0x02, 0x0f]) {
     const stale = join(first, 0x03, new Uint8Array(120));
     assert.equal(failureOf(() => decodeEnvelopeBytes(stale)).reason, 'unknown_version');
   }
@@ -734,7 +743,7 @@ test('the reserved header bit is rejected rather than ignored', () => {
 test('a packed header claiming a handshake kind is refused', () => {
   for (const kindBits of [0, 1, 2]) {
     const bad = unhex(PIN_PLAIN).slice();
-    bad[0] = (0x02 << 4) | (kindBits << 2);
+    bad[0] = (0x03 << 4) | (kindBits << 2);
     const failure = failureOf(() => decodeEnvelopeBytes(bad));
     assert.equal(failure.reason, 'malformed_token');
   }
@@ -751,7 +760,7 @@ test('an unknown handshake kind tag fails closed', () => {
 
 test('a string form token handed to the byte decoder fails closed', () => {
   const token = encodeEnvelope(samplePlain(64));
-  // "O" of OCX2 is 0x4f, whose version nibble is 4, so this trips the version
+  // "O" of OCX3 is 0x4f, whose version nibble is 4, so this trips the version
   // check rather than being misread as a kind followed by a body.
   assert.equal(failureOf(() => decodeEnvelopeBytes(new TextEncoder().encode(token))).reason, 'unknown_version');
 });
@@ -851,7 +860,7 @@ test('a sealed body shorter than its own tag is refused', () => {
   // The header is a literal rather than an encode call, so the test still fails
   // if the encoder starts producing something else. Six bytes of prefix and then
   // the twelve nonce bytes: the body begins at offset 18.
-  const header = join(unhex('2ca0a1a2a307'), NONCE);
+  const header = join(unhex('3ca0a1a2a307'), NONCE);
   for (let bodyLength = 0; bodyLength < 16; bodyLength += 1) {
     const bad = join(header, new Uint8Array(bodyLength));
     const failure = failureOf(() => decodeEnvelopeBytes(bad));
@@ -873,7 +882,7 @@ test('a sealed body shorter than its own tag is refused', () => {
  * as a decryption bug when it is really a framing bug.
  */
 test('a truncated message nonce is refused', () => {
-  const prefix = unhex('2ca0a1a2a307');
+  const prefix = unhex('3ca0a1a2a307');
   for (let present = 0; present < MESSAGE_NONCE_LEN; present += 1) {
     const bad = join(prefix, NONCE.subarray(0, present));
     const failure = failureOf(() => decodeEnvelopeBytes(bad));
@@ -903,8 +912,8 @@ test('a truncated ratchet key is refused', () => {
  */
 test('a huge counter is rejected as a number and never treated as a size', () => {
   const rounds = 20_000;
-  const small = join(unhex('2ca0a1a2a3'), unhex('07'), new Uint8Array(4));
-  const huge = join(unhex('2ca0a1a2a3'), unhex('ffffffff0f'), new Uint8Array(4));
+  const small = join(unhex('3ca0a1a2a3'), unhex('07'), new Uint8Array(4));
+  const huge = join(unhex('3ca0a1a2a3'), unhex('ffffffff0f'), new Uint8Array(4));
 
   // Both reject, one for a short body and one for the same reason after reading
   // a four billion message number. Neither may allocate.

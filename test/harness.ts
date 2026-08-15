@@ -86,6 +86,7 @@ export function cloneSession(session: SessionState): SessionState {
     peer: {
       classicalPublic: Uint8Array.from(session.peer.classicalPublic),
       pqPublic: Uint8Array.from(session.peer.pqPublic),
+      sigPublic: Uint8Array.from(session.peer.sigPublic),
     },
     rootKey: Uint8Array.from(session.rootKey),
     selfRatchetPublic: Uint8Array.from(session.selfRatchetPublic),

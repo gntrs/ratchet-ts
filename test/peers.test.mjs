@@ -55,8 +55,8 @@ async function withHome(fn) {
 
 const fill = (n, b) => Buffer.alloc(n, b);
 /** X25519 is 32 bytes, ML-KEM-768 public is 1184. Fixed content, so fixed words. */
-const IDENTITY_A = { classicalPublic: fill(32, 0x11), pqPublic: fill(1184, 0x22) };
-const IDENTITY_B = { classicalPublic: fill(32, 0xaa), pqPublic: fill(1184, 0xbb) };
+const IDENTITY_A = { classicalPublic: fill(32, 0x11), pqPublic: fill(1184, 0x22), sigPublic: fill(1952, 0x33) };
+const IDENTITY_B = { classicalPublic: fill(32, 0xaa), pqPublic: fill(1184, 0xbb), sigPublic: fill(1952, 0xcc) };
 
 const HEX_A = 'a'.repeat(32);
 const HEX_B = 'b'.repeat(32);
@@ -87,18 +87,27 @@ function storeWith(entries) {
 // verified now shows different words with no way to tell that from an attack.
 // Fix the code, not the literal.
 //
-// The literal changed once, on 2026-08-15, when the derivation stopped hashing
-// the two identities together and started concatenating their fingerprints. The
-// old six word value was 'dumb engine cake curious area collect'. That was a
-// deliberate break and it is the only one: a combined hash gives a man in the
-// middle, who picks the key shown to each side, a birthday search at about 2^33
-// instead of a preimage at 2^66. Anyone who verified a peer before that date is
-// looking at twelve words where they used to see six, which is correct, because
-// what they checked before was worth half of what they were told.
+// The literal has changed twice, both times on purpose, both times in 0.5.1 or
+// later:
+//
+//   2026-08-15, 0.5.1. The derivation stopped hashing the two identities
+//   together and started concatenating their fingerprints. The old six word
+//   value was 'dumb engine cake curious area collect'. A combined hash gives a
+//   man in the middle, who picks the key shown to each side, a birthday search
+//   at about 2^33 instead of a preimage at 2^66.
+//
+//   2026-08-15, 0.6.0. The identity grew an ML-DSA-65 verifying key and the
+//   fingerprint domain went to v2 so the digest covers it. A fingerprint that
+//   ignored the signing key would let an attacker keep both old keys, swap in a
+//   signing key of their own, and print the same words.
+//
+// Anyone who verified a peer before 0.6.0 has to compare again. That is the
+// honest consequence of putting a third key in the identity, and the digest
+// silently ignoring it would have been the dishonest alternative.
 test('pairWords is pinned to a fixed pair of identities', () => {
   assert.equal(
     pairWords(IDENTITY_A, IDENTITY_B),
-    'city harvest idle festival hello black true drastic card act novel erode',
+    'fatal perfect piano steel absent extend forward powder unveil airport lake result',
   );
 });
 
@@ -125,7 +134,7 @@ test('pairWords is the two identity fingerprints, not a hash of the pair', () =>
 // If it did, the two sides could not compare position by position and the whole
 // construction would be back to a single blended value.
 test('changing one identity leaves the other identity words intact', () => {
-  const other = { classicalPublic: fill(32, 0x5c), pqPublic: fill(1184, 0x5d) };
+  const other = { classicalPublic: fill(32, 0x5c), pqPublic: fill(1184, 0x5d), sigPublic: fill(1952, 0x5e) };
   const aWords = formatFingerprint(fingerprint(IDENTITY_A)).split(' ');
   const got = pairWords(IDENTITY_A, other).split(' ');
   const at = got.indexOf(aWords[0]);

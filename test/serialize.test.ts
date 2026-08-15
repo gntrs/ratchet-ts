@@ -32,7 +32,7 @@ test('a session survives death and restore mid conversation, parked key included
 
   const savedBob = serializeSession(bob.session);
   const savedAlice = serializeSession(alice.session);
-  assert.ok(savedBob.startsWith('OCX2.session.'), 'stored state must be self describing');
+  assert.ok(savedBob.startsWith('OCX3.session.'), 'stored state must be self describing');
   assert.ok(/^[A-Za-z0-9._-]+$/.test(savedBob), 'stored state must be one pasteable ASCII token');
 
   // Byte exactness proof: the encoding is canonical (length prefixed fields,
@@ -63,7 +63,7 @@ test('a pending invite survives serialize/deserialize and the accept still compl
 
   const invited = await engine.invite(aliceIdentity);
   const saved = serializePending(invited.pending);
-  assert.ok(saved.startsWith('OCX2.pending.'), 'stored pending must be self describing');
+  assert.ok(saved.startsWith('OCX3.pending.'), 'stored pending must be self describing');
 
   const restored = deserializePending(saved);
   assert.deepEqual(restored, invited.pending);
@@ -81,7 +81,7 @@ test('a pending invite survives serialize/deserialize and the accept still compl
 test('an exported identity imports byte exact and completes a real handshake', async () => {
   const original = await engine.createIdentity();
   const exported = exportIdentity(original);
-  assert.ok(exported.startsWith('OCX2.identity.'), 'exported identity must be self describing');
+  assert.ok(exported.startsWith('OCX3.identity.'), 'exported identity must be self describing');
 
   const imported = importIdentity(exported);
   assert.deepEqual(imported, original);
@@ -121,7 +121,7 @@ test('truncated, corrupted, mislabeled, and future version state all fail closed
   // A single flipped bit in the middle of the body. Nothing structural breaks,
   // a key just silently changes, which is exactly what the checksum is for.
   const flipped = flipByte(body, Math.floor(body.length / 2));
-  await expectFailure('malformed_token', async () => deserializeSession(`OCX2.session.${toBase64Url(flipped)}`));
+  await expectFailure('malformed_token', async () => deserializeSession(`OCX3.session.${toBase64Url(flipped)}`));
 
   // A valid session token fed to the wrong deserializer. The kind label and
   // the kind-bound checksum both refuse it.
@@ -129,18 +129,22 @@ test('truncated, corrupted, mislabeled, and future version state all fail closed
   await expectFailure('malformed_token', async () => importIdentity(saved));
 
   // A future outer protocol version.
-  await expectFailure('unknown_version', async () => deserializeSession(`OCX3.session.${encodedBody}`));
+  await expectFailure('unknown_version', async () => deserializeSession(`OCX4.session.${encodedBody}`));
 
-  // The 0.3.x outer marker. A state file written by the previous release is a
+  // Both older outer markers. A state file written by a previous release is a
   // version problem and has to say so, because the layout behind it genuinely
-  // cannot be read: peerChainEpoch did not exist and skippedKeys were keyed by
-  // a base64 ratchet public rather than an epoch.
-  await expectFailure('unknown_version', async () => deserializeSession(`OCX1.session.${encodedBody}`));
+  // cannot be read. OCX1: peerChainEpoch did not exist and skippedKeys were
+  // keyed by a base64 ratchet public rather than an epoch. OCX2: the peer
+  // identity in a session had no ML-DSA verifying key, so every length prefixed
+  // field after it sits at the wrong offset.
+  for (const stale of ['OCX1', 'OCX2']) {
+    await expectFailure('unknown_version', async () => deserializeSession(`${stale}.session.${encodedBody}`));
+  }
 
   // A future body format version: same token shape, bumped version byte.
   const bumped = Uint8Array.from(body);
   bumped[0] = 3;
-  await expectFailure('unknown_version', async () => deserializeSession(`OCX2.session.${toBase64Url(bumped)}`));
+  await expectFailure('unknown_version', async () => deserializeSession(`OCX3.session.${toBase64Url(bumped)}`));
 
   // The 0.3.x body format version, which is the case that actually happens: a
   // 0.3.4 session token pasted into a 0.4.0 build. It must not be read as a
@@ -148,11 +152,11 @@ test('truncated, corrupted, mislabeled, and future version state all fail closed
   // field is parsed and the failure is a version failure.
   const stale = Uint8Array.from(body);
   stale[0] = 1;
-  await expectFailure('unknown_version', async () => deserializeSession(`OCX2.session.${toBase64Url(stale)}`));
+  await expectFailure('unknown_version', async () => deserializeSession(`OCX3.session.${toBase64Url(stale)}`));
 
   // Assorted garbage that is not even token shaped.
   await expectFailure('malformed_token', async () => deserializeSession('not a token at all'));
-  await expectFailure('malformed_token', async () => deserializeSession('OCX2.session.!!not-base64url!!'));
-  await expectFailure('malformed_token', async () => deserializeSession('OCX2.session.'));
+  await expectFailure('malformed_token', async () => deserializeSession('OCX3.session.!!not-base64url!!'));
+  await expectFailure('malformed_token', async () => deserializeSession('OCX3.session.'));
   await expectFailure('malformed_token', async () => importIdentity(''));
 });

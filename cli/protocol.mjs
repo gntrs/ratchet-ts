@@ -321,6 +321,17 @@ const REASONS = {
   identity_mismatch: {
     transfer: 'the reply answers an invite from a different identity, so something re-addressed the handshake',
   },
+  // The only reason in this table that names an attacker as the FIRST
+  // explanation rather than the last. Every other failure here has a boring
+  // cause that is more likely than malice: a dropped frame, a stale session, a
+  // resent packet. A signature that does not verify has no boring cause. The
+  // bytes were signed by a key, that key is in the same frame, and the two do
+  // not agree, which means the frame was built by somebody who could not sign
+  // as the identity they are claiming.
+  bad_signature: {
+    transfer: 'the handshake is signed by the wrong key, so the machine on the other end is not who the frame says it is',
+    chat: 'the handshake is signed by the wrong key, so whoever answered is not who the frame says they are',
+  },
 };
 
 /** Every context REASONS is written for, so a test can walk all of them. */
