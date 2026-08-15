@@ -395,6 +395,84 @@ function makeChannel(socket, remote) {
   return { remote, prefixBytes: PREFIX_BYTES, send, receive, next: receive, close };
 }
 
+
+/**
+ * Dial a relay, present a rendezvous id, and hand back an ordinary channel.
+ *
+ * THE POINT OF THIS FUNCTION IS HOW LITTLE IT DOES. Once the relay answers with
+ * its paired byte, the socket is a plain byte pipe to the other person and
+ * every layer above here is unchanged: same length prefixed frames, same
+ * envelopes, same handshake, same session. cli/protocol.mjs cannot tell a relay
+ * channel from a direct one and is never told, which is why adding a relay
+ * needed no change to the wire format and cannot weaken it.
+ *
+ * The relay's reply is one byte and it is read with `once`, because everything
+ * after it belongs to the peer. Reading greedily here would swallow the first
+ * frame of a partner who was already waiting and is therefore already sending,
+ * which is the common case rather than a rare one: the second party to arrive
+ * gets paired instantly.
+ */
+export async function connectViaRelay({ host, port, rendezvous, magic, timeoutMs = 15000, waitMs = 10 * 60 * 1000 }) {
+  const socket = new net.Socket({ writableHighWaterMark: WRITE_WINDOW });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = setTimeout(() => bail(new Error(`connect to relay ${host}:${port} timed out after ${timeoutMs}ms`)), timeoutMs);
+
+    function bail(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(err);
+    }
+
+    socket.once('error', (err) => bail(new Error(`relay ${host}:${port}: ${err.message}`)));
+
+    socket.once('connect', () => {
+      socket.setNoDelay(true);
+      socket.write(Buffer.concat([Buffer.from(magic), Buffer.from(rendezvous)]));
+      // From here the wait is for a partner, which is a person doing something,
+      // so the deadline is minutes rather than seconds.
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => bail(new Error('nobody joined this pairing code in time')),
+        waitMs,
+      );
+
+      const onStatus = (chunk) => {
+        if (settled) return;
+        const status = chunk[0];
+        // Anything past the status byte is the peer already talking. Put it
+        // back so the framing layer reads it as the first frame.
+        if (chunk.length > 1) socket.unshift(chunk.subarray(1));
+        if (status === RELAY_STATUS_PAIRED) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(makeChannel(socket, `relay ${host}:${port}`));
+          return;
+        }
+        bail(new Error(
+          status === RELAY_STATUS_BUSY
+            ? 'the relay is full, try again shortly'
+            : 'the relay gave up waiting for the other side',
+        ));
+      };
+
+      // once, not on: exactly one byte is ours and the rest is the peer's.
+      socket.once('data', onStatus);
+    });
+
+    socket.once('close', () => bail(new Error('the relay closed the connection')));
+    socket.connect(port, host);
+  });
+}
+
+/** Mirrors relay/server.mjs. Duplicated as two constants rather than imported,
+ * because cli/frame.mjs must not depend on the server: a client installed from
+ * npm has no reason to carry it. test/relay.test.mjs asserts the two agree. */
+export const RELAY_STATUS_PAIRED = 0x01;
+export const RELAY_STATUS_BUSY = 0x02;
+
 export async function listen({ port = 0, host } = {}) {
   return new Promise((resolve, reject) => {
     // highWaterMark is the knob that decides when write() starts saying false,
