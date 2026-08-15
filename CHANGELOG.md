@@ -5,6 +5,84 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-15
+
+The four things the roadmap has listed for months, done in one release: the
+handshake is signed, you can send to somebody who is offline, two home
+connections can meet through a relay, and setup is a pairing code instead of an
+IP address.
+
+**This breaks the wire and every fingerprint.** The envelope is `OCX3`, the
+binary version byte `0x03`, and the identity carries a third key so the
+fingerprint domain moved to v2. A 0.6.0 peer and a 0.5.x peer cannot talk, and
+everyone has to compare safety words again. Both are unavoidable and both are
+loud rather than silent.
+
+### Added
+
+- **ML-DSA-65 signatures on both handshake frames.** Confidentiality was hybrid
+  and authenticity was X25519 alone, which meant an adversary who can solve
+  discrete log could impersonate a responder in a live handshake. The accept
+  signs the initiator's whole identity as the responder received it, and the
+  initiator verifies against the snapshot it took when it sent the invite, which
+  is what catches a rewritten invite. No third flight was needed.
+- **Offline delivery.** `publishPrekeys`, `sealIntro`, `openIntro`,
+  `verifyBundle`, and an `intro` envelope kind. X3DH with a post-quantum arm,
+  which is what Signal ships as PQXDH. The sender's ephemeral is wiped before
+  the frame is built, which closes the initiator forward secrecy gap the live
+  handshake has always had and makes the offline path the stronger of the two.
+- **`relay/server.mjs` and `ratchet relay`.** A rendezvous server that
+  introduces two sockets and then pipes them. No accounts, no database, no
+  persistence. It never sees the pairing secret, only SHA-256 of it.
+- **Pairing codes.** `ratchet recv --relay HOST` prints one;
+  `ratchet send FILE --code CODE --relay HOST` uses it. 16 bytes of rendezvous
+  secret plus 64 bits of the receiver's fingerprint, in Crockford base32 so it
+  survives being read aloud.
+- **`verifyPeer` on `sendPayload` and `receivePayload`.** The one callback that
+  can refuse a transfer. See below for why it exists.
+- **`bench/machine.mjs`** and `npm run bench:machine`, the harness the published
+  chart row comes from. It existed only as a sentence in the README before.
+
+### Changed
+
+- The handshake costs about 29 times more: **0.88 ms to 25.8 ms** on the same
+  machine, and `createIdentity` 0.26 ms to 2.01 ms. The invite token goes 1687
+  to 8707 characters and the accept 3186 to 10206. **The message envelope does
+  not move at all**, still 34 bytes of overhead, so authentication is a per
+  conversation cost and not a per message one.
+- The chart generator marks pre-0.6.0 rows as not re-measured rather than
+  "pre-0.3.3", which stopped being true the moment a 0.4.0 row went stale, and
+  its caveat now says in the alt text that a shorter bar on an older version is
+  an unauthenticated handshake rather than a faster machine.
+
+### Fixed
+
+- **A security check that did nothing.** The pairing code comparison went in
+  first as an `onHandshake` banner. `announce()` catches everything a banner
+  throws, deliberately, because a rendering bug must never cost somebody their
+  file. So the refusal was swallowed, and an end to end run sent the file to the
+  wrong machine while printing nothing about it. The unit tests were green.
+  `verifyPeer` is separate, awaited and unwrapped, and a test now pins both
+  halves, because the wrong repair would have been making banners fatal.
+- **A relay that ate the first frame.** Reading the hello greedily consumes
+  whatever arrived in the same TCP segment, which is the peer's first frame, and
+  the handshake then fails much later looking like a crypto problem.
+- **`socket.unshift` cannot put those bytes back** once a data listener has put
+  the socket in flowing mode: they are re-emitted between the listener being
+  removed and the pipe being attached, with nobody listening. Leftover bytes are
+  forwarded explicitly now.
+- **A relay that would not shut down.** `net.Server.close()` waits for existing
+  connections to end, which for a relay is never, so the process ignored SIGTERM
+  and the test suite hung with no output at all.
+
+### Note for anyone upgrading
+
+Your identity file still loads, but its fingerprint is different, because the
+digest now covers the signing key. Every peer you have verified will show
+different words. That is correct: a fingerprint that ignored the new key would
+let an attacker keep your other two, swap in a signing key of their own, and
+print the words you already trust.
+
 ## [0.5.1] - 2026-08-15
 
 CLI only, and it changes one thing: the safety words you are asked to compare
