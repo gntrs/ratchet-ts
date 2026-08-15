@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-15
+
+CLI only, and it changes one thing: the safety words you are asked to compare
+out loud. The library API, the wire format and the envelope are untouched, so a
+0.5.1 CLI and a 0.4.0 CLI still talk to each other.
+
+The words are the only defence this tool has against a machine in the middle,
+and they were worth half of what they claimed. `pairWords` hashed both
+identities together and produced six words, and the comment above it said that
+was "exactly as strong as an ordinary fingerprint: 66 bits". It was not. An
+attacker in the middle chooses the key it shows to each side, so it never has to
+find a preimage: it grinds candidate identities to show Alice and candidate
+identities to show Bob until the two six word lines agree. That is a birthday
+search over a 66 bit space, about 2^33 work, which is hours on hardware anyone
+can rent. The roadmap in the README had said so for a while. The code went on
+asserting the comfortable number.
+
+### Changed
+
+- **The compared line is now both identity fingerprints, twelve words, not one
+  hash of the pair.** To pass, the words shown to each side must match position
+  by position, so the attacker needs an identity whose fingerprint equals
+  Alice's AND another whose fingerprint equals Bob's: two independent second
+  preimages at 2^66 each, with no birthday discount because both targets are
+  fixed before the attack starts.
+- **It prints as two rows of six.** Twelve words on one row is about 84 columns
+  before any label, and a safety word broken across a line wrap still looks like
+  a word and still gets read aloud. The break is on the fingerprint boundary and
+  never on terminal width, because the two people comparing are not looking at
+  the same window size. One helper does the grouping for both the plain banner
+  and the chat TUI, so they cannot disagree about where it breaks.
+- **Ordering is by fingerprint hex, not by public key.** An attacker who matched
+  both fingerprints did not have to match the keys underneath them, so a key
+  order could still print the two rows swapped and invite someone to wave it
+  through. Ordering on the thing being compared means the sequence matches if
+  and only if the fingerprints do.
+- The chat strip is three rows rather than two, and the layout budget moved with
+  it. A strip returning more rows than are budgeted does not overflow, it pushes
+  the input box off the bottom of the terminal, which is why the constant and
+  the function are now pinned to each other by a test.
+
+### Note for anyone who verified a peer before this
+
+You will see twelve words where you saw six, and they will not contain the old
+six. Nothing is wrong and nothing was compromised by this change: what you
+compared before was worth half the bits it was described as, and this is the
+correction. Compare again when convenient.
+
 ## [0.5.0] - 2026-08-08
 
 CLI only. The library API, the wire format and the envelope are byte for byte

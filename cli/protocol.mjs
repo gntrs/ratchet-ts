@@ -216,29 +216,50 @@ function sha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function compareBytes(a, b) {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i += 1) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
-}
-
 /**
- * Six words that are IDENTICAL on both ends, for reading aloud over the phone.
+ * Twelve words that are IDENTICAL on both ends, for reading aloud over the
+ * phone. They are the two identity fingerprints, in a canonical order, and not
+ * a hash of the two identities together.
  *
  * `peerWords` alone cannot do this job. A fingerprint of the peer identity is
  * different on each side by construction: I see your words, you see mine. To
  * compare them out loud one party has to recite what it sees and the other has
  * to look up its OWN fingerprint, which is two strings and a rule nobody
- * remembers under pressure. Hashing both identities in a canonical order gives
- * one string, computed the same way on both machines, that either party can
- * simply read out. Sorting by the X25519 public key is what makes it order
- * independent, since neither side agrees on who is "first".
+ * remembers under pressure. So this puts both fingerprints in one string that
+ * either party can simply read out, ordered so that both machines print the
+ * same twelve words in the same sequence.
  *
- * Same digest construction as the library, same wordlist, so it is exactly as
- * strong as an ordinary fingerprint: 66 bits, enough against an automated key
- * swap, not enough against someone grinding keypairs at a named target.
+ * WHY NOT HASH THE PAIR TOGETHER, which is what this did until 2026-08-15.
+ * That produced six words and the comment here claimed it was "exactly as
+ * strong as an ordinary fingerprint: 66 bits". It was not, and the README had
+ * already said so in the roadmap while this file went on asserting the
+ * comfortable number. A machine in the middle is not solving one preimage. It
+ * chooses the key it shows to EACH side, so it grinds candidate identities to
+ * show Alice and candidate identities to show Bob until the two six word lines
+ * happen to agree. That is a birthday search over a 66 bit space, about 2^33
+ * work, which is hours on hardware anybody can rent. The one control this
+ * entire design leans on was worth half the bits it advertised.
+ *
+ * Concatenating instead of hashing removes the attacker's second degree of
+ * freedom. To pass, the words shown to Alice and the words shown to Bob must
+ * match position by position, so the attacker needs an identity whose
+ * fingerprint equals Alice's AND another whose fingerprint equals Bob's: two
+ * independent second preimages at 2^66 each, with no birthday discount because
+ * the targets are fixed before the attack starts.
+ *
+ * TWELVE WORDS IS THE PRICE AND THERE IS NO CHEAPER ONE. Any single string
+ * short enough to stay at six words is a 66 bit space, and a two sided attacker
+ * always gets the square root of it. Resisting that needs roughly 132 bits in
+ * front of the user however it is packaged, as two lines or as one longer line.
+ * Signal shows 60 digits for the same reason. Six words was not a tighter
+ * design, it was the same design with half the check missing.
+ *
+ * Ordered by fingerprint hex rather than by public key. Sorting on the key
+ * would let the two sides disagree about sequence in exactly the case that
+ * matters: an attacker who matched both fingerprints did not have to match the
+ * keys underneath them, so a key order could still print the two lines swapped
+ * and invite a user to wave it through. Ordering on the thing being compared
+ * means the sequence matches if and only if the fingerprints do.
  *
  * THIS IS THE ONLY COPY. cli/chat.mjs used to carry a second one, kept in step
  * by a comment asking whoever edited either to edit both. Two independent
@@ -249,17 +270,12 @@ function compareBytes(a, b) {
  * identity bytes so a change here has to be deliberate.
  */
 export function pairWords(self, peer) {
-  const mine = publicOf(self);
-  const [first, second] = compareBytes(mine.classicalPublic, peer.classicalPublic) <= 0
-    ? [mine, peer]
-    : [peer, mine];
-  return formatFingerprint(
-    fingerprint({
-      classicalPublic: Buffer.concat([first.classicalPublic, second.classicalPublic]),
-      pqPublic: Buffer.concat([first.pqPublic, second.pqPublic]),
-    }),
-  );
+  const mine = fingerprint(publicOf(self));
+  const theirs = fingerprint(peer);
+  const [first, second] = mine.hex <= theirs.hex ? [mine, theirs] : [theirs, mine];
+  return `${formatFingerprint(first)} ${formatFingerprint(second)}`;
 }
+
 
 /**
  * A raw reason string is useless to someone staring at a terminal. Translate

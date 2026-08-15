@@ -922,7 +922,7 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake, o
   // question and accepts only a real answer, the whole word `yes` typed on its
   // own line. There is no single keystroke anywhere in here that confirms
   // anything, Enter on an empty line cancels rather than confirms, and nothing
-  // defaults to yes. A verification is a human saying they compared six words
+  // defaults to yes. A verification is a human saying they compared the words
   // out loud with another human, so it can only ever come from a human.
   //
   // runChat itself knows nothing about where a verification is stored. bin/
@@ -937,7 +937,7 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake, o
     }
     awaitingVerify = { label: label || null };
     note('Read the six safety words aloud with the other person, on a call or in the same room.');
-    note('If they read back the SAME six words, type  yes  and press enter. Anything else cancels.');
+    note('If they read back the SAME twelve words, in the same order, type  yes  and press enter. Anything else cancels.');
   }
 
   function finishVerify(answer) {
@@ -1226,7 +1226,7 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake, o
    *
    * Trusting a change is not the same act as verifying an identity and must
    * never be collapsed into it: all this says is "stop shouting, I know". The
-   * six words still have to be read out loud before that badge goes green.
+   * safety words still have to be read out loud before that badge goes green.
    */
   function trustNew() {
     state.alarm = null;
@@ -1280,7 +1280,7 @@ export async function runChat({ channel, identity, stdin, stdout, onHandshake, o
   function cmdHelp() {
     note([
       'commands',
-      '   /verify   compare the six words and record this peer',
+      '   /verify   compare the safety words and record this peer',
       '   /peer     who is on the other end',
       '   /words    reprint both word lines into the transcript',
       '   /stats    counts and handshake timing',

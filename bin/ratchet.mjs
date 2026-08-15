@@ -58,6 +58,10 @@ import {
 } from '../cli/peers.mjs';
 import { DEFAULT_CHUNK_BYTES, MAX_CHUNK_BYTES, receivePayload, sendPayload } from '../cli/protocol.mjs';
 import { box, color, humanBytes, humanMs, statsTable, words } from '../cli/format.mjs';
+// One grouping of the safety words for the whole tool. The chat TUI draws the
+// same two rows from the same helper, so the plain banner and the full screen
+// cannot disagree about where the fingerprints break.
+import { splitPairWords } from '../cli/ui.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 4477;
@@ -979,7 +983,12 @@ async function openTrust(address) {
 
 function handshakeBanner(trust) {
   return ({ peerWords, sessionWords, peerHex }) => {
-    say(`  ${color.dim('compare aloud')}  ${words(sessionWords)}`);
+    // Two rows of six, one per fingerprint. The label sits on the first and the
+    // second is indented to line up under it, so the twelve words read as one
+    // block rather than as two unrelated things.
+    const lines = splitPairWords(sessionWords);
+    say(`  ${color.dim('compare aloud')}  ${words(lines[0])}`);
+    for (const line of lines.slice(1)) say(`  ${' '.repeat(13)}  ${words(line)}`);
     say(`  ${color.dim('peer identity')}  ${words(peerWords)}`);
     if (trust) trust.observe({ peerHex, peerWords });
   };
