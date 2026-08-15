@@ -1218,10 +1218,13 @@ still be close, but treat it as indicative rather than fresh.
 
 **Two harnesses disagree about the battery figure and neither is being hidden.**
 The 5.256 ms above came from the README harness. The chart further down says
-**4.44 ms**, from a longer run: 20 rounds of 2000 iterations with a 25 second
-sustained warmup, phase separated so the handshake loop does not run immediately
-before the seal loop, and reporting the median of per-round p50 rather than a
-single pass. The longer run is the better number and the chart carries it. Both
+**4.44 ms**, from a longer run: 20 rounds with a 25 second sustained warmup,
+phase separated so the handshake loop does not run immediately before the seal
+loop, and reporting the median of per-round p50 rather than a single pass. That
+method now lives in `bench/machine.mjs` as `npm run bench:machine`, which it did
+not when this paragraph was first written: it was typed once and thrown away, so
+the number the chart presented as the careful one was the only number here nobody
+could reproduce. The longer run is the better number and the chart carries it. Both
 are printed here because the 18 percent gap between two honest measurements of
 one unchanged binary on one machine is itself the most useful fact in this
 section: it is the width of the error bar on every millisecond in this file.
@@ -1260,13 +1263,23 @@ three strings first. It is the fastest question to answer.
 
 ### Across machines, and why this chart is honest about being broken
 
-Eight runs on seven machines, and **only one of them is a 0.3.4 number.** I own
-exactly one of these eight boxes. The other seven were run by other people on
-0.1.0 and 0.2.0, before the native curve and hash backends landed in 0.3.3, and
-I cannot re-measure them. So the chart draws the mixed vintage instead of
-hiding it: the measured row is solid, the seven inherited rows are hatched, and
-the legend says which is which. A hatched bar is a number from a different
-version of this library and is not comparable to the solid one.
+Nine runs on eight machines, and **only two of them are current numbers.** I own
+exactly two of these nine boxes: the 7530U laptop and, as of 2026-08-15, an M4
+Mac mini. The other seven were run by other people on 0.1.0 and 0.2.0, before the
+native curve and hash backends landed in 0.3.3, and I cannot re-measure them. So
+the chart draws the mixed vintage instead of hiding it: the two measured rows are
+solid, the seven inherited rows are hatched, and the legend says which is which.
+A hatched bar is a number from a different version of this library and is not
+comparable to a solid one.
+
+**The two solid bars are not comparable to each other either, and they are drawn
+in different colours to say so.** The M4 is a desktop on mains, free to boost.
+The 7530U is a laptop pinned near its base clock on battery. That is a power
+state stacked on top of a hardware difference, and the section above is about why
+the power half cannot be divided back out afterwards. The M4 handshake of **0.88
+ms** against the 7530U's **4.44 ms** is not a five-times chip gap; the same
+laptop did **1.85 ms** plugged in. Treat the two solid rows as two machines in
+two states, not as a ranking.
 
 The size of the lie, measured: the 7530U row said **7.6 ms** on 0.2.0. The same
 laptop on 0.4.0 does **4.44 ms on battery** and did **1.85 ms plugged in** on
@@ -1284,16 +1297,17 @@ never enough to make two bars comparable.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3, power state not recorded). Only the Ryzen 5 7530U row is measured on 0.4.0. Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured row mixes version, backend and CPU clock together and is not a clean hardware ranking. Absolute milliseconds on the measured row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Apple M4 0.88 (v0.4.0, measured, on AC, free to boost), Ryzen 5 7530U 4.44 (v0.4.0, measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3, power state not recorded). Only the Apple M4 and Ryzen 5 7530U rows are measured on 0.4.0. Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured rows mixes version, backend and CPU clock together and is not a clean hardware ranking. The measured rows are not comparable to each other either: Apple M4 on AC, free to boost, Ryzen 5 7530U on battery at 1890 MHz base clock, so the distance between them is a power state stacked on a difference in hardware. Absolute milliseconds on the Ryzen 5 7530U row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M1 0.0190 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3, power state not recorded). Only the Ryzen 5 7530U row is measured on 0.4.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured row. Absolute milliseconds on the measured row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M4 0.0046 (v0.4.0, measured, on AC, free to boost), Apple M1 0.0190 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3, power state not recorded). Only the Apple M4 and Ryzen 5 7530U rows are measured on 0.4.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. The measured rows are not comparable to each other either: Apple M4 on AC, free to boost, Ryzen 5 7530U on battery at 1890 MHz base clock, so the distance between them is a power state stacked on a difference in hardware. Absolute milliseconds on the Ryzen 5 7530U row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
 </picture>
 
 | Machine | Node | Version | Handshake | `seal` | `open` |
 |---|---|---|---|---|---|
+| **Apple M4 (Mac mini 2024, macOS 26)** | **22** | **0.4.0, measured 2026-08-15, on AC and free to boost** | **0.88 ms** | **0.0046 ms** | **0.0042 ms** |
 | **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.4.0, measured 2026-08-08, on battery at 1890 MHz** | **4.44 ms** | **0.0355 ms** | **0.0292 ms** |
 | Apple M1 (laptop 2020, macOS) | not recorded | 0.1.0, inherited | 6.2 ms | 0.019 ms | not recorded |
 | Core i5-12500H (laptop 2022) | 24 | 0.2.0, inherited | 6.5 ms | 0.025 ms | not recorded |
