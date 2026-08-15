@@ -24,13 +24,22 @@
 // on every timing row, and the chart draws a base-clock row in a different
 // colour from a boost-clock row, the same way it already hatches a stale one.
 //
-// Only ONE of these machines is available to this project. The Ryzen 5 7530U
-// row is re-measured on every release. The other seven are inherited from
-// hardware borrowed once, they have NOT been re-measured on 0.3.3 or later, and
-// they are drawn hatched so the chart is honest about being a mixed-vintage
-// comparison rather than quietly presenting stale numbers as current. None of
-// them recorded a power state either, which is a second reason they are not
-// comparable to the measured row and not a reason to guess one for them.
+// TWO of these machines are available to this project, the Ryzen 5 7530U laptop
+// and the Apple M4 desktop, and both are re-measured on releases that move the
+// measured paths. The other seven are inherited from hardware borrowed once,
+// they have NOT been re-measured on 0.3.3 or later, and they are drawn hatched
+// so the chart is honest about being a mixed-vintage comparison rather than
+// quietly presenting stale numbers as current. None of them recorded a power
+// state either, which is a second reason they are not comparable to the measured
+// rows and not a reason to guess one for them.
+//
+// THE TWO MEASURED ROWS ARE NOT COMPARABLE TO EACH OTHER IN ABSOLUTE TERMS, and
+// this file draws them in different colours for exactly that reason. One is a
+// laptop pinned near its base clock on battery, the other is a desktop on mains
+// free to boost. That is a power-state difference stacked on a hardware
+// difference, and the section above is about why the first of those cannot be
+// factored out after the fact. Read the gap between them as "these are two
+// different machines in two different states", not as a chip ranking.
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +87,14 @@ const CURRENT_VERSION = '0.4.0';
  * That is also why there is no open chart: one bar is not a comparison.
  */
 const MACHINES = [
+  {
+    label: 'Apple M4', sub: 'Mac mini 2024, macOS 26, Node 22',
+    handshake: 0.8818, seal: 0.0046, open: 0.0042,
+    version: '0.4.0', measuredOn: '2026-08-15',
+    power: 'ac-boost',
+    backends: 'aead native, curve native, hash native',
+    harness: 'bench/machine.mjs, 256 B payload, 20 rounds, 25 s sustained warmup, median of per-round p50, phases separated, seal and open on separate session pairs. Run from the 0.5.0 tree, which is byte-identical to 0.4.0 in the library and on the wire. The three medians reproduced to within 2.4 percent across three independent 20-round runs. The open row is the one to read with care: its p10-p90 spread across rounds was 27 percent on this machine, so the median is solid but the per-round distribution has a slow mode that is not yet explained.',
+  },
   {
     label: 'Ryzen 5 7530U', sub: 'laptop, Windows 11, Node 25',
     handshake: 4.444, seal: 0.0355, open: 0.0292,
@@ -217,7 +234,15 @@ function rowTag(m) {
   return `v${m.version}, ${isStale(m) ? 'pre-0.3.3' : 'measured'}, ${powerText(m.power)}`;
 }
 
-const CURRENT_ROW = MACHINES.find((m) => !isStale(m));
+const CURRENT_ROWS = MACHINES.filter((m) => !isStale(m));
+
+/** "the Apple M4 row" / "the Apple M4 and Ryzen 5 7530U rows". */
+function rowList(rows) {
+  const labels = rows.map((m) => m.label);
+  if (labels.length === 0) return 'measured';
+  if (labels.length === 1) return labels[0];
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
 
 const THEMES = {
   light: {
@@ -261,12 +286,19 @@ function altText({ title, unit, key, decimals }) {
   const rows = [...MACHINES].sort((a, b) => a[key] - b[key]);
   const parts = rows.map((m) => `${m.label} ${fmt(m[key], decimals)} (${rowTag(m)})`);
   const caveat = key === 'handshake'
-    ? 'Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured row mixes version, backend and CPU clock together and is not a clean hardware ranking.'
-    : 'The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured row.';
-  const powerNote = CURRENT_ROW && powerClass(CURRENT_ROW) === 'base'
-    ? `Absolute milliseconds on the measured row are power-state dependent: it was taken ${powerText(CURRENT_ROW.power)} against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker.`
+    ? 'Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured rows mixes version, backend and CPU clock together and is not a clean hardware ranking.'
+    : 'The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows.';
+  const baseRows = CURRENT_ROWS.filter((m) => powerClass(m) === 'base');
+  const powerNote = baseRows.length
+    ? `Absolute milliseconds on the ${rowList(baseRows)} row are power-state dependent: it was taken ${powerText(baseRows[0].power)} against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker.`
     : '';
-  return `${title}, median ${unit} per machine, lower is better: ${parts.join(', ')}. Only the ${CURRENT_ROW ? CURRENT_ROW.label : 'measured'} row is measured on ${CURRENT_VERSION}. ${caveat} ${powerNote}`.trim();
+  // Two measured rows in different power states are not a hardware ranking, and
+  // saying so is the whole reason the power field is required.
+  const crossNote = CURRENT_ROWS.length > 1 && new Set(CURRENT_ROWS.map(powerClass)).size > 1
+    ? `The measured rows are not comparable to each other either: ${CURRENT_ROWS.map((m) => `${m.label} ${powerText(m.power)}`).join(', ')}, so the distance between them is a power state stacked on a difference in hardware.`
+    : '';
+  const measuredCount = CURRENT_ROWS.length === 1 ? 'row is' : 'rows are';
+  return `${title}, median ${unit} per machine, lower is better: ${parts.join(', ')}. Only the ${rowList(CURRENT_ROWS)} ${measuredCount} measured on ${CURRENT_VERSION}. ${caveat} ${crossNote} ${powerNote}`.replace(/\s+/g, ' ').trim();
 }
 
 function hatch(t) {
@@ -385,10 +417,12 @@ ${rows}
 `;
 }
 
-// `open` is recorded on the measured row but has no chart: seven of the eight
-// machines never recorded an open number, and a chart with one bar on it is not
-// a comparison. The field stays in the data so the next machine that gets
-// measured has somewhere to put it.
+// `open` is recorded on both measured rows but still has no chart: seven of the
+// nine machines never recorded an open number, so the chart would be two bars in
+// two different power states with seven blanks behind them, which is a worse
+// picture than no picture. It becomes worth drawing when a third machine is
+// measured, or when the two measured rows are ever taken in the same power
+// state. The field stays in the data until then.
 const CHARTS = [
   { file: 'handshake', title: 'Full handshake (invite + accept + open)', unit: 'ms', key: 'handshake', decimals: 2 },
   { file: 'seal', title: 'seal, one steady-state send', unit: 'ms', key: 'seal', decimals: 4 },
