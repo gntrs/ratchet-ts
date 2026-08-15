@@ -437,16 +437,32 @@ INSTALL
   Without -g there is no ratchet command, only a library, and the shell
   answers "command not found". That is the first thing everyone hits.
 
-THE WHOLE THING
+THE WHOLE THING, ON ONE NETWORK
   1. On the machine that RECEIVES:  ratchet recv
   2. It prints a command. Run that one on the machine that SENDS.
-  3. Both screens print six words. Read them aloud. Same words means the two
-     machines are talking to each other and nobody else. Different words
-     means someone is in the middle: stop, and delete whatever arrived.
+  3. Both screens print twelve words in two rows. Read them aloud. Same words
+     in the same order means the two machines are talking to each other and
+     nobody else. Different words means someone is in the middle: stop, and
+     delete whatever arrived.
+
+THE WHOLE THING, ACROSS THE INTERNET
+  Two home connections cannot reach each other directly, because neither can
+  accept an inbound connection. Both ends dial out to one small relay instead.
+
+  1. RECEIVES:  ratchet recv --relay relay.example.com
+  2. It prints a pairing code. Send them the code any way you like.
+  3. SENDS:     ratchet send FILE --code THE-CODE --relay relay.example.com
+
+  The code carries part of the receiver's identity, so if it leaks and somebody
+  else answers, the send stops before anything leaves the disk. There is no
+  default relay: run  ratchet relay  on any box with a public address, or point
+  --relay at one you trust. It cannot read anything crossing it.
 
 EXAMPLES
   ratchet recv                              wait here, save what arrives
   ratchet recv --out ~/Downloads --once     one file into Downloads, then quit
+  ratchet recv --relay relay.example.com    print a pairing code, works anywhere
+  ratchet send FILE --code ABC123-... --relay relay.example.com
   ratchet send .env --to 192.168.1.42       send a secret file, no ceremony
   ratchet send photo.jpg --to 192.168.1.42:5000
   ratchet send --text "wifi is hunter2" --to 192.168.1.42
@@ -457,8 +473,11 @@ EXAMPLES
 
 COMMANDS
   recv [--port N] [--out DIR] [--once]   listen, then write what arrives
+  recv --relay HOST[:PORT]               print a pairing code and wait there
   send PATH --to HOST[:PORT]             send one file, or - to read stdin
+  send PATH --code CODE --relay HOST     send to a pairing code
   send --text "..." --to HOST[:PORT]     send a message instead of a file
+  relay [--port N]                       run a rendezvous relay yourself
   chat [--port N] | chat --to HOST[:PORT]   live session, no messages on disk
   id [--reset --yes]                     this machine safety words and key file
   peers                                  everyone seen before, and who is verified
@@ -472,6 +491,9 @@ FLAGS
   --out DIR      where recv writes, default here. It never overwrites.
   --once         recv handles one transfer and exits
   --to HOST      HOST, HOST:PORT, or [IPv6]:PORT
+  --relay HOST   meet at a relay instead of connecting directly.
+                 Also read from RATCHET_RELAY.
+  --code CODE    the pairing code the receiver printed. Needs --relay.
   --text "..."   send a message instead of a file
   --label NAME   the name to file a verified peer under
   --stats        add the full measurement table under the summary line
@@ -480,14 +502,17 @@ FLAGS
   --help, --version
 
 WORTH KNOWING
-  The two machines talk straight over TCP, so they need a route to each other,
-  usually the same wifi. There is no relay and no account.
+  Without --relay the two machines talk straight over TCP, so they need a route
+  to each other, usually the same wifi. There is no account either way.
+  A relay sees ciphertext, byte counts, timing and two IP addresses. It cannot
+  read a message, change one without being caught, or pretend to be either of
+  you. It can refuse to work, and it can log who met whom and when.
   Filename, size and hash are encrypted with the payload, so an observer sees
   a byte count and nothing else.
   What lands on the receiving disk is plain, unencrypted content. The wire was
   protected, the file is not.
   Every completed handshake writes one row to ~/.ratchet/peers.json: the peer
-  key, its six words, the addresses it came from, and dates. That is how a
+  key, its own six words, the addresses it came from, and dates. That is how a
   changed key gets noticed. No filename and no message is ever recorded there.
   Delete a row with  ratchet peers forget WHO.
 
@@ -1431,6 +1456,74 @@ function pinnedGate(pin) {
   };
 }
 
+/**
+ * Run the rendezvous relay in the foreground.
+ *
+ * Deliberately the same process and the same file people install, rather than a
+ * separate package. Somebody who wants to stop trusting a relay they did not
+ * choose should be one command away from running their own, and a second
+ * install step is exactly where that intention dies.
+ */
+async function cmdRelay(opts) {
+  const port = opts.port === undefined ? RELAY_DEFAULT_PORT : parsePort(opts.port, '--port');
+  const { createRelay } = await import('../relay/server.mjs');
+
+  const relay = createRelay({
+    // Rendezvous ids and byte counts. Never an address: an operator needs to
+    // see that it is working, and nobody needs a log of which two machines met.
+    onEvent: (event) => {
+      const at = new Date().toISOString();
+      if (event.type === 'closed') {
+        say(color.dim(`${at}  closed   ${event.id.slice(0, 8)}  ${humanBytes(event.bytes)} in ${humanMs(event.ms)}`));
+      } else if (event.type === 'paired') {
+        say(`${color.dim(at)}  ${color.green('paired')}   ${event.id.slice(0, 8)}`);
+      } else if (event.type === 'waiting') {
+        say(color.dim(`${at}  waiting  ${event.id.slice(0, 8)}  (${event.waiting} in flight)`));
+      } else if (event.type === 'timeout') {
+        say(color.dim(`${at}  timeout  ${event.id.slice(0, 8)}`));
+      } else {
+        say(color.yellow(`${at}  refused  ${event.reason}`));
+      }
+    },
+  });
+
+  let address;
+  try {
+    address = await relay.listen(port);
+  } catch (err) {
+    if (err.code === 'EADDRINUSE') {
+      return failWith(
+        `port ${port} is already in use`,
+        `Pick another:  ${color.bold(`${cmd()} relay --port ${port + 1}`)}`,
+      );
+    }
+    if (err.code === 'EACCES') {
+      return failWith(
+        `not allowed to listen on port ${port}, ports below 1024 need administrator rights`,
+        `Use a high port:  ${color.bold(`${cmd()} relay --port ${RELAY_DEFAULT_PORT}`)}`,
+      );
+    }
+    throw err;
+  }
+
+  say(
+    box('ratchet relay', [
+      `listening  ${color.dim(`${address.address}:${address.port}`)}`,
+      `they use   ${color.dim(`--relay YOUR-PUBLIC-ADDRESS:${address.port}`)}`,
+    ]),
+  );
+  say('');
+  say(color.dim('It introduces two sockets and pipes them. It cannot read anything crossing it.'));
+  say(color.dim('It does see byte counts, timing, and both addresses. Ctrl-C to stop.'));
+  say('');
+
+  await new Promise((resolve) => {
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, resolve);
+  });
+  await relay.close();
+  return 0;
+}
+
 async function cmdSend(opts, rest) {
   const relay = relayTarget(opts);
   const usingCode = typeof opts.code === 'string';
@@ -2063,6 +2156,9 @@ async function main() {
       return cmdRecv(opts);
     case 'send':
       return cmdSend(opts, rest);
+    case 'relay':
+      if (rest.length > 0) usageError(`relay takes no arguments, got ${rest[0]}`);
+      return cmdRelay(opts);
     case 'chat':
       return cmdChat(opts, rest);
     case 'id':

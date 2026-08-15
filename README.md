@@ -77,22 +77,36 @@ section further down, with the method and the mistakes.
   0.3.x peer and a 0.4.0 peer cannot talk.
 - **0.5.0** stopped writing your identity and your peer list to disk in the
   clear. CLI only, the library and the wire are byte for byte 0.4.0.
+- **0.5.1** made the line you compare aloud both fingerprints instead of one
+  hash of the pair, which is the difference between a 2^66 problem and a 2^33
+  one.
+- **0.6.0** closed the four gaps this list used to open with. It signs the
+  handshake, it can send to somebody who is offline, it can cross the internet
+  through a relay, and it can be set up with a pairing code instead of an IP
+  address. It moves the wire format and every fingerprint changes.
 
-What is honestly still missing, in the order it is worth doing:
+The four things this section listed for months are done. What replaced them is
+shorter and harder:
 
-1. **Two people on two different home networks cannot connect.** Both offered
-   addresses are private. Today this needs a LAN, or Tailscale, or a port
-   forward. This is the single largest gap and nothing else competes with it.
-2. **Both people have to be online at the same moment.** The handshake needs
-   three flights, so you cannot message someone whose laptop is shut.
-3. **Nothing is signed.** The handshake authenticates with X25519 only, so a
-   quantum adversary cannot read a recorded session but could impersonate one
-   live. Confidentiality is hybrid, authenticity is classical.
-4. **The safety words are 66 bits each.** Fixed in 0.5.1: the line you compare
-   is now both fingerprints, so a machine in the middle needs two independent
-   second preimages at 2^66 rather than one birthday search at 2^33. Until then
-   it was one hash of the pair and worth about 49 core-hours to break.
-5. **No audit, no formal model, one author.**
+1. **No audit, no formal model, one author.** This has been the last line here
+   since 0.1.0 and it is now the first. Everything below is a detail next to it.
+2. **A relay is a metadata observer.** It cannot read a message or impersonate
+   anybody, and it does see two addresses meeting at a timestamp and how many
+   bytes passed. Run your own, or do not use one: `ratchet relay` is one
+   command and there is deliberately no default host.
+3. **Offline delivery does not solve replay on its own.** A prekey bundle is a
+   static offer, so a recorded intro frame can be delivered twice. The library
+   refuses a conversation id it has already opened and makes the caller hold
+   that set, which is the honest version rather than the invisible one. Signal
+   solves this properly with one time prekeys handed out by a server, and there
+   is no server here.
+4. **A pairing code pins 64 bits, not 132.** It makes the first identity check
+   automatic, which beats a ritual people skip. It does not replace comparing
+   the words aloud for a peer you intend to keep.
+5. **The handshake got about 29 times more expensive.** 0.88 ms to 25.8 ms on
+   the same machine, because it now carries two ML-DSA-65 signatures. Once per
+   conversation, and still invisible next to a network round trip, but it is a
+   real number and it is not hidden.
 
 ## Why
 
@@ -218,9 +232,12 @@ If you would rather install nothing, `npx ratchet-ts recv` and
 is an unrelated package by somebody else.
 
 The file contents and the metadata around them (the filename, the size, the
-hash) are all encrypted with the same ratchet the library exposes. It is a
-direct TCP connection between the two machines: no relay, no server, no account,
-nothing of yours in the middle.
+hash) are all encrypted with the same ratchet the library exposes. By default it
+is a direct TCP connection between the two machines: no relay, no server, no
+account, nothing of yours in the middle. Add `--relay` and the two machines meet
+at a host instead, which is what makes it work across the internet; that host
+still cannot read anything, and what it does see is spelled out under "A relay,
+so two home connections can meet".
 
 Both ends print the safety words the moment the handshake lands, before the
 bytes finish moving.
@@ -676,11 +693,20 @@ Three is the compromise. A 20 message chain pays 66 extra bytes rather than 660,
 so about 90 percent of the saving survives, and losing all three independently is
 not something a non-adversarial transport does.
 
-**This breaks the wire.** `ENVELOPE_VERSION` is `OCX2`, the binary version byte
-is `0x02`, and the serialized session version is `2`. A 0.3.x peer fails with
-`unknown_version`, and so does a 0.3.x session restored from disk. Both ends and
-any persisted state move together. The failure is loud and named, not a silent
-misparse.
+**This breaks the wire.** In 0.4.0 `ENVELOPE_VERSION` was `OCX2`, the binary
+version byte `0x02`, the serialized session version `2`. A 0.3.x peer failed
+with `unknown_version`, and so did a 0.3.x session restored from disk.
+
+**0.6.0 moved them again**, to `OCX3` and `0x03`, because the handshake frames
+grew signatures and the identity grew a third key. The message envelope is byte
+identical to OCX2 apart from the version nibble, still 34 bytes of overhead: a
+conversation pays for authentication once rather than per message. The version
+still had to move, because an OCX2 peer would meet two unexpected length
+prefixed blobs and call the frame malformed, and a peer that cannot check a
+signature must not proceed as though there were none to check.
+
+Both ends and any persisted state move together, either way. The failure is
+loud and named, not a silent misparse.
 
 ### What the CLI keeps on disk, as of 0.5.0
 
@@ -791,34 +817,19 @@ Read these before trusting it with anything real.
   identity. **The CLI does this for you from 0.5.0** and the details are under
   "What the CLI keeps on disk" above; if you want the same behaviour in your own
   app, that code is worth reading before writing your own.
-- **Fingerprints need out-of-band checking.** The 6-word (66-bit) fingerprint only
-  stops impersonation if two people compare it on a channel the attacker does not
-  control.
+- **Fingerprints need out-of-band checking.** Each identity fingerprint is six
+  words (66 bits), and the line the CLI asks you to compare is both of them,
+  twelve words, on a channel the attacker does not control. A pairing code
+  automates the first 64 bits of that check and does not replace it.
 
 ## What comes next, and why in that order
 
-Each of these closes a specific line in Limits. They are listed in the order they
-unblock each other, not the order they sound exciting.
+Four of the five items that used to be here shipped in 0.6.0. They are described
+under "What 0.6.0 added" below rather than deleted, because a roadmap that
+quietly loses its entries teaches you nothing about whether the plan was any
+good. What is left:
 
-**1. A relay, so two people on two different home networks can actually connect.**
-Right now both addresses `ratchet recv` prints are private, so the tool works on
-one LAN, over Tailscale, or through a port forward, and nowhere else. Both ends
-dialling out to one small public host fixes that for everybody, including behind
-carrier NAT, because nothing has to accept an inbound connection. Measured
-through a prototype: under 1% of throughput and a few milliseconds of handshake,
-and the relay itself burns about 6 CPU seconds per gigabyte it carries. It sees
-ciphertext, sizes, timing and two IP addresses, and it is trusted for
-availability, not for confidentiality. This is first because everything social
-about the tool is blocked on it.
-
-**2. Pairing codes, so nobody has to type an address or compare words by hand.**
-One side prints a code, the other pastes it, and that is the entire setup. The
-code carries a per session random token plus a pin of the receiver's fingerprint,
-so the *machine* does the identity check that a human currently has to do out
-loud and usually does not. That converts the weakest link in the whole design
-from a ritual nobody performs into an automatic check that runs every time.
-
-**3. Attachments, and voice notes on top of them.** A `#path` grammar in the chat
+**1. Attachments, and voice notes on top of them.** A `#path` grammar in the chat
 input, which needs one new message kind on the wire and is therefore a breaking
 change, so it lands with something else that breaks. Voice becomes almost free
 once files work: record, attach, done. Received files are shown as a name, a
@@ -826,25 +837,25 @@ size and a hash, and are never rendered inline, because rendering bytes a strang
 chose is the wrong instinct for a tool whose whole promise is about who those
 bytes came from.
 
-**4. Offline delivery.** Today the handshake needs three flights, so both people
-must be running the software at the same moment. A prekey bundle, which is the
-same idea Signal ships as PQXDH, lets you send to someone who is asleep. It also
-closes a real gap that has nothing to do with convenience: the current handshake
-has the initiator contributing only long term keys, so recording the wire today
-and stealing that identity file later recovers the root key. An ephemeral that is
-deleted before the message leaves removes that. This is the largest single piece
-of work on the list and it touches the protocol, not just the CLI.
+**2. One time prekeys, so offline delivery stops being replayable.** 0.6.0 ships
+the bundle and states plainly that a recorded intro frame can be delivered
+twice, with the caller holding a set of conversation ids to refuse the second.
+That is honest and it is not good enough for anything at scale. Doing it
+properly means one time prekeys consumed on use, which means something that
+hands each one out exactly once, which means the relay would have to hold state
+it currently refuses to hold. That trade is the actual design question and it
+has not been answered yet.
 
-**5. Post-quantum authentication, and longer safety words.** The handshake's
-*confidentiality* is hybrid today, which is what defeats harvest-now-decrypt-later.
-Its *authentication* is X25519 alone, so a quantum adversary standing in the
-middle of a live handshake is not stopped by the ML-KEM half. ML-DSA-65 signatures
-fix that at roughly 2 kB of identity and a fraction of a millisecond to verify.
-The second half of this item shipped in 0.5.1 and is struck from the list. The
-pair line used to hash both identities together, which made it 66 bits against a
-preimage and about 33 against the birthday search a two sided attacker actually
-runs. It is now the two fingerprints printed separately, twelve words, two
-independent 2^66 problems. What remains here is the ML-DSA half.
+**3. Prekey rotation that a user does not have to think about.**
+`publishPrekeys` is cheap and is meant to be called on a schedule. Nothing calls
+it on a schedule. The bundle carries a signed timestamp so that a client which
+enforces a maximum age cannot be lied to, and no client enforces one yet.
+
+**4. A second pair of eyes on the 0.6.0 handshake.** It is new, it is the part
+most worth getting wrong quietly, and one author reviewed it. The transcripts
+are length prefixed and domain separated, the accept binds the initiator's whole
+identity, and test/handshake-auth.test.ts walks a full machine-in-the-middle
+scenario. None of that is the same as somebody else having looked.
 
 **Not on this list, deliberately.** Group chat, which is a different protocol
 (MLS) and not a feature of this one. A nickname directory, which requires a server
@@ -853,6 +864,136 @@ GUI, which is a product question rather than a protocol one and should wait unti
 the protocol stops changing. And an audit, which is not a task on a roadmap, it is
 something you buy, and it should be bought after the wire format stops moving and
 not before.
+
+## What 0.6.0 added
+
+Four changes, and the first two move the wire format, so a 0.6.0 peer and a
+0.5.x peer cannot talk to each other. Every fingerprint changes too, because the
+identity grew a third key and the digest has to cover it.
+
+### The handshake is signed
+
+Confidentiality was hybrid and authenticity was X25519 alone. The gap was
+specific: the responder proves who it is with DH1, computed from its long term
+X25519 key, and its ML-KEM key was never used in the handshake at all. An
+adversary who can solve discrete log on Curve25519 recovers that secret from a
+public key and can produce a valid accept as anybody. ML-KEM protects a recorded
+session and does nothing about that.
+
+Both handshake frames now carry an **ML-DSA-65** signature over a length
+prefixed, domain separated transcript. No third flight was needed, because each
+side already sends exactly one frame that can carry one.
+
+The part worth reading twice is that the accept signs the **initiator's whole
+identity as the responder received it**, and the initiator verifies against the
+snapshot it took when it sent the invite. That is what catches a rewritten
+invite: a machine in the middle can substitute its identity to the responder,
+and the responder will sign an accept over that identity, but the initiator
+rebuilds the transcript with its own and the signature does not verify.
+
+What it costs, measured on the M4 rather than estimated:
+
+| | 0.4.0 | 0.6.0 |
+|---|---|---|
+| `createIdentity` | 0.26 ms | **2.01 ms** |
+| full handshake | 0.88 ms | **25.8 ms** |
+| `seal` (256 B) | 0.0046 ms | 0.0047 ms |
+| `open` (256 B) | 0.0042 ms | 0.0041 ms |
+| invite token | 1687 chars | **8707** |
+| accept token | 3186 chars | **10206** |
+| message envelope | 34 bytes | 34 bytes |
+
+That is roughly 29x on the handshake and nothing at all per message. An earlier
+draft of this README guessed "roughly 2 kB of identity and a fraction of a
+millisecond to verify". Both halves were wrong: the verifying key is 1952 bytes,
+each signature is 3309, signing is 7.9 ms and verifying is 2.9 ms. Twenty-six
+milliseconds once per conversation is still invisible next to a network round
+trip, which is the reason this is acceptable rather than the reason it is cheap.
+
+Signing is hedged, per FIPS 204, so two invites from one identity are not byte
+identical. Only the vector generator pins deterministic mode, and a test asserts
+the live signer stays hedged.
+
+### You can send to somebody who is offline
+
+`publishPrekeys` mints a bundle to publish anywhere and the secrets that open
+messages sent to it. `sealIntro` writes to a bundle in one frame with no round
+trip. This is X3DH with a post-quantum arm, which is what Signal ships as PQXDH.
+
+Four secrets go into the root, each doing a different job:
+
+| | |
+|---|---|
+| DH1 | sender ephemeral to recipient identity, binds who it is for |
+| DH2 | sender identity to recipient prekey, binds who it is from |
+| DH3 | sender ephemeral to recipient prekey, forward secrecy |
+| SS | ML-KEM-768 to the recipient's PQ prekey, the post-quantum arm |
+
+**The ephemeral is why this path is stronger than the live handshake, not
+weaker.** This README has said since 0.1.0 that the live handshake gives the
+initiator no forward secrecy before the first ratchet step, because the
+initiator contributes only a long term key: record the wire today, steal the
+identity file later, recover the root. DH1 and DH3 both use an ephemeral whose
+secret is wiped before the token is built, so the value a future thief would
+need stopped existing before the bytes went out.
+
+What it does not solve is replay, and the API says so out loud rather than in a
+comment. A bundle is a static offer, so a recorded intro can be delivered twice.
+`openIntro` refuses a conversation id it has already opened, and the set of
+those ids is a **required argument** rather than an option with an empty
+default, because the version with a default is one where everybody who did not
+read the docs has no replay protection and no way to find out.
+
+### A relay, so two home connections can meet
+
+```
+ratchet relay                                 # on any box with a public address
+ratchet recv --relay relay.example.com        # prints a pairing code
+ratchet send FILE --code THE-CODE --relay relay.example.com
+```
+
+`relay/server.mjs` introduces two sockets and then gets out of the way. After
+the pairing byte it is a pipe: no parsing, no framing, no inspection. That is
+why adding it needed no change to the envelope and cannot weaken it.
+
+**What it learns:** ciphertext, byte counts, timing, and two IP addresses. It is
+trusted for availability and nothing else. It cannot read a message, cannot
+change one without the AEAD noticing, and cannot impersonate either party. A
+hostile relay's whole power is to refuse service, to log who talked to whom and
+when, and to see how much was said. If two addresses meeting at a timestamp is
+the thing you need to hide, a relay you do not run is the wrong answer.
+
+It never sees the pairing secret: both clients meet on SHA-256 of it, so an
+operator who logs everything still cannot join a rendezvous it is carrying.
+
+**There is no default relay host and that is deliberate.** A default would route
+everybody through one machine chosen by me and paid for by me, and it would keep
+doing that after I stopped paying. Running one is one command.
+
+### Pairing codes, so nobody types an IP address
+
+A code is 16 bytes of rendezvous secret plus the first 64 bits of the receiver's
+fingerprint, in Crockford base32:
+
+```
+DG752N-30KF11-XQ5N5X-9C5W4C-D9RFYC-56RAHE-MY0
+```
+
+Crockford because a code gets read aloud, and somebody hearing "one" for I or
+"zero" for O has to still get in. The decoder folds the lookalikes back.
+
+The secret keeps strangers out of the socket. **The fingerprint prefix is for
+when the code leaks**, which is the case that actually happens, because codes
+travel over WhatsApp: an attacker who wins the race to the rendezvous still
+arrives holding their own identity, and the sender refuses before one byte of
+payload leaves the disk. 64 bits is a second preimage at 2^64 keypairs with no
+birthday shortcut, because the target is fixed before the attacker sees the code.
+
+That check turns the weakest link in the whole design, a verification ritual
+people skip, into something the machine does every time. It does not replace
+comparing the words aloud for a peer you intend to keep: 64 bits pinned by a
+code you may have pasted somewhere is a different claim from 132 bits two people
+read to each other.
 
 ## Tests
 
@@ -1311,17 +1452,18 @@ never enough to make two bars comparable.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Apple M4 0.88 (v0.4.0, measured, on AC, free to boost), Ryzen 5 7530U 4.44 (v0.4.0, measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12500H 6.50 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12450H 7.00 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 10.90 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 11.50 (v0.2.0, pre-0.3.3, power state not recorded). Only the Apple M4 and Ryzen 5 7530U rows are measured on 0.4.0. Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured rows mixes version, backend and CPU clock together and is not a clean hardware ranking. The measured rows are not comparable to each other either: Apple M4 on AC, free to boost, Ryzen 5 7530U on battery at 1890 MHz base clock, so the distance between them is a power state stacked on a difference in hardware. Absolute milliseconds on the Ryzen 5 7530U row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, not re-measured, power state not recorded), Core i5-12500H 6.50 (v0.2.0, not re-measured, power state not recorded), Core i5-12450H 7.00 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 10.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 11.50 (v0.2.0, not re-measured, power state not recorded), Apple M4 25.83 (v0.6.0, measured, on AC, free to boost). Only the Apple M4 row is measured on 0.6.0. READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 25.8 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M4 0.0046 (v0.4.0, measured, on AC, free to boost), Apple M1 0.0190 (v0.1.0, pre-0.3.3, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, pre-0.3.3, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, pre-0.3.3, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, pre-0.3.3, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, pre-0.3.3, power state not recorded). Only the Apple M4 and Ryzen 5 7530U rows are measured on 0.4.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. The measured rows are not comparable to each other either: Apple M4 on AC, free to boost, Ryzen 5 7530U on battery at 1890 MHz base clock, so the distance between them is a power state stacked on a difference in hardware. Absolute milliseconds on the Ryzen 5 7530U row are power-state dependent: it was taken on battery at 1890 MHz base clock against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M4 0.0047 (v0.6.0, measured, on AC, free to boost), Apple M1 0.0190 (v0.1.0, not re-measured, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, not re-measured, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, not re-measured, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, not re-measured, power state not recorded). Only the Apple M4 row is measured on 0.6.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. Unlike the handshake, the seal path did not change in 0.6.0: signatures are a per conversation cost, not a per message one." width="760">
 </picture>
 
 | Machine | Node | Version | Handshake | `seal` | `open` |
 |---|---|---|---|---|---|
-| **Apple M4 (Mac mini 2024, macOS 26)** | **22** | **0.4.0, measured 2026-08-15, on AC and free to boost** | **0.88 ms** | **0.0046 ms** | **0.0042 ms** |
+| **Apple M4 (Mac mini 2024, macOS 26)** | **22** | **0.6.0, measured 2026-08-15, on AC and free to boost** | **25.83 ms** | **0.0047 ms** | **0.0041 ms** |
+| Apple M4 (same box, same day) | 22 | 0.4.0, before the handshake was signed | 0.88 ms | 0.0046 ms | 0.0042 ms |
 | **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.4.0, measured 2026-08-08, on battery at 1890 MHz** | **4.44 ms** | **0.0355 ms** | **0.0292 ms** |
 | Apple M1 (laptop 2020, macOS) | not recorded | 0.1.0, inherited | 6.2 ms | 0.019 ms | not recorded |
 | Core i5-12500H (laptop 2022) | 24 | 0.2.0, inherited | 6.5 ms | 0.025 ms | not recorded |

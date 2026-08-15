@@ -49,17 +49,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 /**
  * Rows at this version are current. Anything else is drawn as stale.
  *
- * This says 0.4.0 while package.json says 0.5.0, and that is deliberate rather
- * than a stale constant. 0.5.0 changed only the CLI at-rest story, how the
- * identity file and the peer list are stored on disk. It touched none of the
- * handshake, seal or open paths and did not move the wire format, so 0.5.0 is
- * byte-identical to 0.4.0 in the library and on the wire. 0.4.0 is the version
- * these numbers actually describe, and pretending they were taken on a version
- * that changed nothing about them would be the same class of error the header
- * above is about. Bump this when a release changes the measured paths, not
- * merely when the version number moves.
+ * Bump this when a release changes the MEASURED paths, not merely when the
+ * version number moves. It sat at 0.4.0 through 0.5.0 and 0.5.1 for exactly
+ * that reason: 0.5.0 changed only how the identity file is stored on disk and
+ * 0.5.1 changed only how many safety words are printed, so neither touched the
+ * handshake, seal or open paths, and claiming numbers had been taken on a
+ * version that changed nothing about them would be the same class of error this
+ * header is about.
+ *
+ * 0.6.0 is a real bump. Both handshake frames now carry an ML-DSA-65 signature,
+ * so the handshake column is measuring a different protocol from every earlier
+ * row, and by a large factor: the same machine went from 0.88 ms to 25.8 ms.
+ * That is the cost of post-quantum authentication and it is paid once per
+ * conversation. The seal and open columns did not move at all.
  */
-const CURRENT_VERSION = '0.4.0';
+const CURRENT_VERSION = '0.6.0';
 
 /**
  * `handshake` is the full invite + accept + complete exchange in median ms.
@@ -89,11 +93,11 @@ const CURRENT_VERSION = '0.4.0';
 const MACHINES = [
   {
     label: 'Apple M4', sub: 'Mac mini 2024, macOS 26, Node 22',
-    handshake: 0.8818, seal: 0.0046, open: 0.0042,
-    version: '0.4.0', measuredOn: '2026-08-15',
+    handshake: 25.8287, seal: 0.0047, open: 0.0041,
+    version: '0.6.0', measuredOn: '2026-08-15',
     power: 'ac-boost',
     backends: 'aead native, curve native, hash native',
-    harness: 'bench/machine.mjs, 256 B payload, 20 rounds, 25 s sustained warmup, median of per-round p50, phases separated, seal and open on separate session pairs. Run from the 0.5.0 tree, which is byte-identical to 0.4.0 in the library and on the wire. The three medians reproduced to within 2.4 percent across three independent 20-round runs. The open row is the one to read with care: its p10-p90 spread across rounds was 27 percent on this machine, so the median is solid but the per-round distribution has a slow mode that is not yet explained.',
+    harness: 'bench/machine.mjs, 256 B payload, 20 rounds, 25 s sustained warmup, median of per-round p50, phases separated, seal and open on separate session pairs. The same machine on 0.4.0, measured the same way and the same day, was 0.8818 ms handshake, 0.0046 seal, 0.0042 open: the handshake column is 29x and the message columns did not move, which is the whole shape of what 0.6.0 costs. The open row is the one to read with care: its p10-p90 spread across rounds is around 30 percent on this machine, so the median is solid and reproduces to within a few percent across runs, but the per-round distribution has a slow mode that is not yet explained.',
   },
   {
     label: 'Ryzen 5 7530U', sub: 'laptop, Windows 11, Node 25',
@@ -229,9 +233,17 @@ function powerText(p) {
   return p;
 }
 
-/** The tag drawn to the right of every bar, and reused verbatim in the alt text. */
+/**
+ * The tag drawn to the right of every bar, and reused verbatim in the alt text.
+ *
+ * It used to hardcode "pre-0.3.3" for every stale row, which was true while the
+ * only stale rows were the seven inherited 0.1.0 and 0.2.0 ones. At 0.6.0 the
+ * 0.4.0 Ryzen row went stale too, and a tag calling a 0.4.0 measurement
+ * "pre-0.3.3" is simply false. The version number is right there in the tag, so
+ * the word next to it only has to say whether the row is current.
+ */
 function rowTag(m) {
-  return `v${m.version}, ${isStale(m) ? 'pre-0.3.3' : 'measured'}, ${powerText(m.power)}`;
+  return `v${m.version}, ${isStale(m) ? 'not re-measured' : 'measured'}, ${powerText(m.power)}`;
 }
 
 const CURRENT_ROWS = MACHINES.filter((m) => !isStale(m));
@@ -286,8 +298,8 @@ function altText({ title, unit, key, decimals }) {
   const rows = [...MACHINES].sort((a, b) => a[key] - b[key]);
   const parts = rows.map((m) => `${m.label} ${fmt(m[key], decimals)} (${rowTag(m)})`);
   const caveat = key === 'handshake'
-    ? 'Every inherited row predates the native curve and hash backends added in 0.3.3 and none recorded a power state, so the distance between them and the measured rows mixes version, backend and CPU clock together and is not a clean hardware ranking.'
-    : 'The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows.';
+    ? 'READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 25.8 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state.'
+    : 'The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. Unlike the handshake, the seal path did not change in 0.6.0: signatures are a per conversation cost, not a per message one.';
   const baseRows = CURRENT_ROWS.filter((m) => powerClass(m) === 'base');
   const powerNote = baseRows.length
     ? `Absolute milliseconds on the ${rowList(baseRows)} row are power-state dependent: it was taken ${powerText(baseRows[0].power)} against a 4.5 GHz boost ceiling, so the same code on mains power is considerably quicker.`
