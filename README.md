@@ -895,20 +895,53 @@ What it costs, measured on the M4 rather than estimated:
 
 | | 0.4.0 | 0.6.0 |
 |---|---|---|
-| `createIdentity` | 0.26 ms | **2.01 ms** |
-| full handshake | 0.88 ms | **25.8 ms** |
-| `seal` (256 B) | 0.0046 ms | 0.0047 ms |
-| `open` (256 B) | 0.0042 ms | 0.0041 ms |
+| `createIdentity` | 0.26 ms | **10.7 ms**, once ever |
+| full handshake | 0.88 ms | **14.6 ms** |
+| `invite` | 0.1 ms | **0.01 ms** |
+| `seal` (256 B) | 0.0046 ms | 0.0048 ms |
+| `open` (256 B) | 0.0042 ms | 0.0044 ms |
 | invite token | 1687 chars | **8707** |
 | accept token | 3186 chars | **10206** |
 | message envelope | 34 bytes | 34 bytes |
 
-That is roughly 29x on the handshake and nothing at all per message. An earlier
+That is about 16x on the handshake and nothing at all per message. An earlier
 draft of this README guessed "roughly 2 kB of identity and a fraction of a
 millisecond to verify". Both halves were wrong: the verifying key is 1952 bytes,
-each signature is 3309, signing is 7.9 ms and verifying is 2.9 ms. Twenty-six
-milliseconds once per conversation is still invisible next to a network round
-trip, which is the reason this is acceptable rather than the reason it is cheap.
+each signature is 3309, signing is 8.0 ms and verifying is 1.5 ms.
+
+**It was 25.8 ms before the identity certificate.** The first version signed the
+conversation id together with the sender's identity on every invite, which is
+8 ms of the most expensive operation in the library, repeated forever, to
+re-state a fact that never changes. It is now signed once when the identity is
+created and carried on every invite after that, which is why `invite` is a
+hundredth of a millisecond and `createIdentity` went up instead. See "The
+certificate, and what it does not prove" below for why that is not a weakening.
+
+Fifteen milliseconds once per conversation is still invisible next to a network
+round trip, which is the reason this is acceptable rather than the reason it is
+cheap.
+
+### The certificate, and what it does not prove
+
+The invite carries an **identity certificate**: ML-DSA-65 over the identity's
+own three public keys, signed once at creation.
+
+It is worth being precise about what that buys, because the per invite version
+it replaced did not buy more. Both are signed by the identity's OWN signing key,
+so both prove possession of `sigSecret` and say nothing about `classicalSecret`
+or `pqSecret`. Anyone can pair somebody else's X25519 and ML-KEM keys with a
+signing keypair of their own and sign either shape. What catches that is the
+**fingerprint**, which covers all three keys and therefore changes, and the
+**accept transcript**, which binds the initiator identity the responder actually
+saw so the real initiator refuses. Neither of those moved.
+
+What the old shape did have was the conversation id inside the signature. That
+bound an invite to one conversation while invites stayed replayable verbatim
+anyway, so it was never freshness. Dropping it means an attacker can point a
+recorded identity at a different conversation id, which gets them a session with
+somebody who is not listening: a way to waste a responder's CPU, which they
+already had. `test/handshake-auth.test.ts` asserts that re-stamping is accepted,
+rather than leaving it implied.
 
 Signing is hedged, per FIPS 204, so two invites from one identity are not byte
 identical. Only the vector generator pins deterministic mode, and a test asserts
@@ -1452,17 +1485,17 @@ never enough to make two bars comparable.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/handshake-dark.svg">
-  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, not re-measured, power state not recorded), Core i5-12500H 6.50 (v0.2.0, not re-measured, power state not recorded), Core i5-12450H 7.00 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 10.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 11.50 (v0.2.0, not re-measured, power state not recorded), Apple M4 25.83 (v0.6.0, measured, on AC, free to boost). Only the Apple M4 row is measured on 0.6.0. READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 25.8 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state." width="760">
+  <img src="bench/charts/handshake-light.svg" alt="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, not re-measured, power state not recorded), Core i5-12500H 6.50 (v0.2.0, not re-measured, power state not recorded), Core i5-12450H 7.00 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 10.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 11.50 (v0.2.0, not re-measured, power state not recorded), Apple M4 14.56 (v0.6.0, measured, on AC, free to boost). Only the Apple M4 row is measured on 0.6.0. READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 14.6 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state." width="760">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/seal-dark.svg">
-  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M4 0.0047 (v0.6.0, measured, on AC, free to boost), Apple M1 0.0190 (v0.1.0, not re-measured, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, not re-measured, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, not re-measured, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, not re-measured, power state not recorded). Only the Apple M4 row is measured on 0.6.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. Unlike the handshake, the seal path did not change in 0.6.0: signatures are a per conversation cost, not a per message one." width="760">
+  <img src="bench/charts/seal-light.svg" alt="seal, one steady-state send, median ms per machine, lower is better: Apple M4 0.0048 (v0.6.0, measured, on AC, free to boost), Apple M1 0.0190 (v0.1.0, not re-measured, power state not recorded), Core i5-12450H 0.0230 (v0.2.0, not re-measured, power state not recorded), Core i5-12500H 0.0250 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 0.0280 (v0.2.0, not re-measured, power state not recorded), Ryzen 5 7530U 0.0355 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Core i5-10400F 0.0420 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 0.0500 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 0.0530 (v0.2.0, not re-measured, power state not recorded). Only the Apple M4 row is measured on 0.6.0. The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. Unlike the handshake, the seal path did not change in 0.6.0: signatures are a per conversation cost, not a per message one." width="760">
 </picture>
 
 | Machine | Node | Version | Handshake | `seal` | `open` |
 |---|---|---|---|---|---|
-| **Apple M4 (Mac mini 2024, macOS 26)** | **22** | **0.6.0, measured 2026-08-15, on AC and free to boost** | **25.83 ms** | **0.0047 ms** | **0.0041 ms** |
+| **Apple M4 (Mac mini 2024, macOS 26)** | **22** | **0.6.0, measured 2026-08-16, on AC and free to boost** | **14.56 ms** | **0.0048 ms** | **0.0044 ms** |
 | Apple M4 (same box, same day) | 22 | 0.4.0, before the handshake was signed | 0.88 ms | 0.0046 ms | 0.0042 ms |
 | **Ryzen 5 7530U (laptop, Win 11)** | **25** | **0.4.0, measured 2026-08-08, on battery at 1890 MHz** | **4.44 ms** | **0.0355 ms** | **0.0292 ms** |
 | Apple M1 (laptop 2020, macOS) | not recorded | 0.1.0, inherited | 6.2 ms | 0.019 ms | not recorded |

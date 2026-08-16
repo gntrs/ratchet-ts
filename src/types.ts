@@ -78,6 +78,15 @@ export interface IdentityKeyPair {
    */
   readonly sigPublic: Uint8Array;
   readonly sigSecret: Uint8Array;
+  /**
+   * This identity, signed by its own signing key, computed once at creation.
+   *
+   * It is what an invite carries instead of a fresh signature per handshake.
+   * See `certifyIdentity` in identity.ts for why a per invite signature was
+   * costing 8 ms and proving nothing the fingerprint and the accept transcript
+   * did not already prove.
+   */
+  readonly certificate: Uint8Array;
 }
 
 /** The publishable half of an identity. Safe to paste anywhere. */
@@ -140,11 +149,18 @@ export interface InvitePayload {
   /** Random id tying an accept back to its invite. */
   readonly conversationId: string;
   /**
-   * ML-DSA-65 over the invite transcript. See `inviteTranscript` in
-   * handshake.ts for exactly what is covered and why replay is handled
-   * elsewhere rather than here.
+   * The sender's identity certificate: ML-DSA-65 over its own three public
+   * keys, signed once when the identity was created and reused for every
+   * invite it ever sends.
+   *
+   * It says "these three keys are one identity, asserted by the holder of the
+   * signing key". It deliberately does NOT cover the conversation id, because
+   * that bound an invite to one conversation while invites stayed replayable
+   * verbatim anyway, and it never proved possession of the X25519 or ML-KEM
+   * halves in either shape. The protection against a machine in the middle is
+   * the accept transcript, which is per handshake and stays that way.
    */
-  readonly signature: Uint8Array;
+  readonly certificate: Uint8Array;
 }
 
 export interface AcceptPayload {

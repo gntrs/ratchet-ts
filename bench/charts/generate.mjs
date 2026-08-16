@@ -93,11 +93,11 @@ const CURRENT_VERSION = '0.6.0';
 const MACHINES = [
   {
     label: 'Apple M4', sub: 'Mac mini 2024, macOS 26, Node 22',
-    handshake: 25.8287, seal: 0.0047, open: 0.0041,
-    version: '0.6.0', measuredOn: '2026-08-15',
+    handshake: 14.5621, seal: 0.0048, open: 0.0044,
+    version: '0.6.0', measuredOn: '2026-08-16',
     power: 'ac-boost',
     backends: 'aead native, curve native, hash native',
-    harness: 'bench/machine.mjs, 256 B payload, 20 rounds, 25 s sustained warmup, median of per-round p50, phases separated, seal and open on separate session pairs. The same machine on 0.4.0, measured the same way and the same day, was 0.8818 ms handshake, 0.0046 seal, 0.0042 open: the handshake column is 29x and the message columns did not move, which is the whole shape of what 0.6.0 costs. The open row is the one to read with care: its p10-p90 spread across rounds is around 30 percent on this machine, so the median is solid and reproduces to within a few percent across runs, but the per-round distribution has a slow mode that is not yet explained.',
+    harness: 'bench/machine.mjs, 256 B payload, 20 rounds, 25 s sustained warmup, median of per-round p50, phases separated, seal and open on separate session pairs. The same machine on 0.4.0, measured the same way, was 0.8818 ms handshake, 0.0046 seal, 0.0042 open, so signing the handshake costs about 16x and the message columns did not move. It was 25.8 ms before the identity certificate replaced a per invite signature; that one change took 11 ms off every handshake by moving 8 ms of signing to a single call at identity creation. The open row is the one to read with care: its p10-p90 spread across rounds is around 30 percent on this machine, so the median is solid and reproduces to within a few percent across runs, but the per-round distribution has a slow mode that is not yet explained.',
   },
   {
     label: 'Ryzen 5 7530U', sub: 'laptop, Windows 11, Node 25',
@@ -298,7 +298,7 @@ function altText({ title, unit, key, decimals }) {
   const rows = [...MACHINES].sort((a, b) => a[key] - b[key]);
   const parts = rows.map((m) => `${m.label} ${fmt(m[key], decimals)} (${rowTag(m)})`);
   const caveat = key === 'handshake'
-    ? 'READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 25.8 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state.'
+    ? 'READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 14.6 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state.'
     : 'The inherited rows recorded neither their payload size nor their power state, so they are not directly comparable to the 256 B measured rows. Unlike the handshake, the seal path did not change in 0.6.0: signatures are a per conversation cost, not a per message one.';
   const baseRows = CURRENT_ROWS.filter((m) => powerClass(m) === 'base');
   const powerNote = baseRows.length

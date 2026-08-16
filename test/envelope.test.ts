@@ -26,7 +26,7 @@ test('envelope round trip is exact for all three payload kinds', async () => {
     kind: 'invite',
     conversationId: 'a1b2c3d4e5f60718',
     sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
-    signature: randomBytes(3309),
+    certificate: randomBytes(3309),
   };
   const accept: AcceptPayload = {
     kind: 'accept',

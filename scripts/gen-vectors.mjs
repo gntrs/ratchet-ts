@@ -153,13 +153,21 @@ const transcript = (domain, parts) => {
   return concat(utf8ToBytes(domain), lengths, ...parts);
 };
 
-const inviteTranscript = (id, sender) =>
-  transcript('OCX2 invite transcript v1', [
-    utf8ToBytes(id),
-    sender.classicalPublic,
-    sender.pqPublic,
-    sender.sigPublic,
-  ]);
+/** Mirrors certificateMessage() in src/identity.ts. No conversation id in it. */
+const certificateMessage = (identity) => {
+  const lengths = new Uint8Array(12);
+  const view = new DataView(lengths.buffer);
+  view.setUint32(0, identity.classicalPublic.length, false);
+  view.setUint32(4, identity.pqPublic.length, false);
+  view.setUint32(8, identity.sigPublic.length, false);
+  return concat(
+    utf8ToBytes('OCX3 identity certificate v1'),
+    lengths,
+    identity.classicalPublic,
+    identity.pqPublic,
+    identity.sigPublic,
+  );
+};
 
 const acceptTranscript = (id, initiator, responder, kemCiphertext, ratchetPublic) =>
   transcript('OCX2 accept transcript v1', [
@@ -178,13 +186,15 @@ const acceptTranscript = (id, initiator, responder, kemCiphertext, ratchetPublic
 // Invite. Mirrors beginInvite() with the conversation id injected.
 // ---------------------------------------------------------------------------
 
-const inviteSignature = signFixed(inviteTranscript(conversationId, alicePublic), aliceSig.secretKey);
+// The identity certificate, not a per invite signature. Signed once over the
+// three public keys and reused for every invite this identity ever sends.
+const inviteCertificate = signFixed(certificateMessage(alicePublic), aliceSig.secretKey);
 
 const inviteToken = encodeEnvelope({
   kind: 'invite',
   sender: alicePublic,
   conversationId,
-  signature: inviteSignature,
+  certificate: inviteCertificate,
 });
 
 // ---------------------------------------------------------------------------

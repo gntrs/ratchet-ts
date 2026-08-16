@@ -238,7 +238,7 @@ function bodyWriter(payload: InvitePayload | AcceptPayload | IntroPayload): Writ
       w.blob(payload.sender.classicalPublic);
       w.blob(payload.sender.pqPublic);
       w.blob(payload.sender.sigPublic);
-      w.blob(payload.signature);
+      w.blob(payload.certificate);
       return w;
     case 'accept':
       w.text(payload.conversationId);
@@ -272,13 +272,13 @@ function decodeHandshakeBody(kind: 'invite' | 'accept' | 'intro', body: Uint8Arr
       const classicalPublic = r.blob();
       const pqPublic = r.blob();
       const sigPublic = r.blob();
-      const signature = r.blob();
+      const certificate = r.blob();
       r.end();
       const out: InvitePayload = {
         kind,
         conversationId,
         sender: { classicalPublic, pqPublic, sigPublic },
-        signature,
+        certificate,
       };
       return out;
     }

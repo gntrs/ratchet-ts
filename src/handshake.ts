@@ -22,6 +22,7 @@ import {
   MLKEM768_PUBLIC_LEN,
   X25519_PUBLIC_LEN,
   publicOf,
+  verifyCertificate,
 } from './identity.js';
 import { kdfHandshake, kdfRoot } from './kdf.js';
 
@@ -80,7 +81,6 @@ import { kdfHandshake, kdfRoot } from './kdf.js';
  * The README carries the measured figures rather than these estimates.
  */
 
-const INVITE_DOMAIN = utf8ToBytes('OCX2 invite transcript v1');
 const ACCEPT_DOMAIN = utf8ToBytes('OCX2 accept transcript v1');
 
 /**
@@ -103,15 +103,6 @@ function transcript(domain: Uint8Array, parts: readonly Uint8Array[]): Uint8Arra
   const view = new DataView(lengths.buffer);
   parts.forEach((part, i) => view.setUint32(i * 4, part.length, false));
   return concat(domain, lengths, ...parts);
-}
-
-function inviteTranscript(conversationId: string, sender: PublicIdentity): Uint8Array {
-  return transcript(INVITE_DOMAIN, [
-    utf8ToBytes(conversationId),
-    sender.classicalPublic,
-    sender.pqPublic,
-    sender.sigPublic,
-  ]);
 }
 
 /**
@@ -147,9 +138,10 @@ function newConversationId(): string {
 export function beginInvite(self: IdentityKeyPair): { token: EnvelopeToken; pending: PendingSession } {
   const conversationId = newConversationId();
   const sender = publicOf(self);
-  const signature = ml_dsa65.sign(inviteTranscript(conversationId, sender), self.sigSecret);
+  // No signing here, and that is the point: the certificate was signed once
+  // when this identity was created. An invite is now free of asymmetric work.
   return {
-    token: encodeEnvelope({ kind: 'invite', sender, conversationId, signature }),
+    token: encodeEnvelope({ kind: 'invite', sender, conversationId, certificate: self.certificate }),
     pending: {
       conversationId,
       role: 'initiator',
@@ -179,13 +171,13 @@ export function acceptInvite(self: IdentityKeyPair, invite: InvitePayload): { to
   requireLength(invite.sender.classicalPublic, X25519_PUBLIC_LEN, 'invite classical public key');
   requireLength(invite.sender.pqPublic, MLKEM768_PUBLIC_LEN, 'invite ML-KEM public key');
   requireLength(invite.sender.sigPublic, MLDSA65_PUBLIC_LEN, 'invite ML-DSA public key');
-  requireLength(invite.signature, MLDSA65_SIGNATURE_LEN, 'invite signature');
+  requireLength(invite.certificate, MLDSA65_SIGNATURE_LEN, 'invite certificate');
 
   // Before any key agreement runs. Encapsulating to an unauthenticated public
   // key and only then asking who it belonged to would mean the expensive half
   // of the handshake is reachable by anyone who can send bytes.
-  if (!ml_dsa65.verify(invite.signature, inviteTranscript(invite.conversationId, invite.sender), invite.sender.sigPublic)) {
-    fail('bad_signature', 'the invite is not signed by the identity it claims');
+  if (!verifyCertificate(invite.sender, invite.certificate)) {
+    fail('bad_signature', 'the invite identity does not vouch for itself');
   }
 
   const ratchet = x25519Keygen();

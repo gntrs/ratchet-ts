@@ -7,6 +7,7 @@ import { fail } from './errors.js';
 import {
   MLDSA65_PUBLIC_LEN,
   MLDSA65_SECRET_LEN,
+  MLDSA65_SIGNATURE_LEN,
   MLKEM768_PUBLIC_LEN,
   MLKEM768_SECRET_LEN,
   X25519_PUBLIC_LEN,
@@ -488,6 +489,10 @@ export function exportIdentity(identity: IdentityKeyPair): string {
   w.blob(identity.pqSecret);
   w.blob(identity.sigPublic);
   w.blob(identity.sigSecret);
+  // Stored rather than recomputed on import. ML-DSA signing is hedged, so a
+  // recomputed certificate would be a different 3309 bytes every time the CLI
+  // loads its identity, and it would cost 8 ms on every single command.
+  w.blob(identity.certificate);
   return encodeState('identity', w.finish());
 }
 
@@ -499,6 +504,7 @@ export function importIdentity(value: string): IdentityKeyPair {
   const pqSecret = r.blob();
   const sigPublic = r.blob();
   const sigSecret = r.blob();
+  const certificate = r.blob();
   r.end();
   requireLength(classicalPublic, X25519_PUBLIC_LEN, 'classical public key');
   requireLength(classicalSecret, X25519_SECRET_LEN, 'classical secret key');
@@ -506,5 +512,6 @@ export function importIdentity(value: string): IdentityKeyPair {
   requireLength(pqSecret, MLKEM768_SECRET_LEN, 'ML-KEM secret key');
   requireLength(sigPublic, MLDSA65_PUBLIC_LEN, 'ML-DSA public key');
   requireLength(sigSecret, MLDSA65_SECRET_LEN, 'ML-DSA secret key');
-  return { classicalPublic, classicalSecret, pqPublic, pqSecret, sigPublic, sigSecret };
+  requireLength(certificate, MLDSA65_SIGNATURE_LEN, 'identity certificate');
+  return { classicalPublic, classicalSecret, pqPublic, pqSecret, sigPublic, sigSecret, certificate };
 }

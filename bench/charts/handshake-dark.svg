@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="550" viewBox="0 0 1000 550" role="img" aria-label="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, not re-measured, power state not recorded), Core i5-12500H 6.50 (v0.2.0, not re-measured, power state not recorded), Core i5-12450H 7.00 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 10.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 11.50 (v0.2.0, not re-measured, power state not recorded), Apple M4 25.83 (v0.6.0, measured, on AC, free to boost). Only the Apple M4 row is measured on 0.6.0. READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 25.8 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="550" viewBox="0 0 1000 550" role="img" aria-label="Full handshake (invite + accept + open), median ms per machine, lower is better: Ryzen 5 7530U 4.44 (v0.4.0, not re-measured, on battery at 1890 MHz base clock), Apple M1 6.20 (v0.1.0, not re-measured, power state not recorded), Core i5-12500H 6.50 (v0.2.0, not re-measured, power state not recorded), Core i5-12450H 7.00 (v0.2.0, not re-measured, power state not recorded), Ryzen 7 5800X3D 7.30 (v0.2.0, not re-measured, power state not recorded), EPYC 9354P 32-core 8.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 10.90 (v0.2.0, not re-measured, power state not recorded), Core i5-10400F 11.50 (v0.2.0, not re-measured, power state not recorded), Apple M4 14.56 (v0.6.0, measured, on AC, free to boost). Only the Apple M4 row is measured on 0.6.0. READ THE VERSION ON EACH BAR BEFORE COMPARING THEM. The 0.6.0 handshake carries two ML-DSA-65 signatures and every earlier row does not, which on one unchanged machine is the difference between 0.88 ms and 14.6 ms. So a shorter bar on an older version is not a faster machine, it is an unauthenticated handshake. The seven 0.1.0 and 0.2.0 rows additionally predate the native curve and hash backends added in 0.3.3 and none recorded a power state.">
   <rect width="1000" height="550" fill="#0d1117"/>
   <defs>
     <pattern id="stale" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -10,62 +10,62 @@
   <text x="16" y="46" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#9198a1">median ms · lower is better · single thread, no tuning · mixed versions and mixed power states, read the legend</text>
 
   <rect x="16" y="53" width="12" height="12" rx="2" fill="#4493f8"/>
-  <text x="34" y="63" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">measured on 0.6.0, on AC and free to boost, 256 B payload, 2026-08-15</text>
+  <text x="34" y="63" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">measured on 0.6.0, on AC and free to boost, 256 B payload, 2026-08-16</text>
   <rect x="16" y="71" width="12" height="12" rx="2" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
   <text x="34" y="81" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">inherited, pre-0.3.3, not re-measured, power state not recorded</text>
   <line x1="256" y1="112" x2="256" y2="538" stroke="#3d444d" stroke-width="1"/>
 
   <text x="244" y="129" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Ryzen 5 7530U</text>
   <text x="244" y="145" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">laptop, Windows 11, Node 25</text>
-  <rect x="256" y="120" width="52" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="316" y="134" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">4.44 ms</text>
+  <rect x="256" y="120" width="92" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="356" y="134" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">4.44 ms</text>
   <text x="640" y="134" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.4.0, not re-measured, on battery at 1890 MHz base clock</text>
 
   <text x="244" y="175" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Apple M1</text>
   <text x="244" y="191" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">laptop 2020, macOS</text>
-  <rect x="256" y="166" width="72" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="336" y="180" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">6.20 ms</text>
+  <rect x="256" y="166" width="128" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="392" y="180" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">6.20 ms</text>
   <text x="640" y="180" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.1.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="221" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Core i5-12500H</text>
   <text x="244" y="237" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">laptop 2022, Windows, Node 24</text>
-  <rect x="256" y="212" width="75" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="339" y="226" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">6.50 ms</text>
+  <rect x="256" y="212" width="134" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="398" y="226" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">6.50 ms</text>
   <text x="640" y="226" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="267" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Core i5-12450H</text>
   <text x="244" y="283" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">laptop 2022, Windows, Node 24</text>
-  <rect x="256" y="258" width="81" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="345" y="272" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">7.00 ms</text>
+  <rect x="256" y="258" width="144" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="408" y="272" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">7.00 ms</text>
   <text x="640" y="272" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="313" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Ryzen 7 5800X3D</text>
   <text x="244" y="329" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">desktop, Windows, Node 24</text>
-  <rect x="256" y="304" width="85" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="349" y="318" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">7.30 ms</text>
+  <rect x="256" y="304" width="150" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="414" y="318" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">7.30 ms</text>
   <text x="640" y="318" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="359" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">EPYC 9354P 32-core</text>
   <text x="244" y="375" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">VPS, Linux, Node 22</text>
-  <rect x="256" y="350" width="103" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="367" y="364" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">8.90 ms</text>
+  <rect x="256" y="350" width="183" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="447" y="364" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">8.90 ms</text>
   <text x="640" y="364" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="405" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Core i5-10400F</text>
   <text x="244" y="421" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">desktop 2020, WSL, Node 22</text>
-  <rect x="256" y="396" width="127" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="391" y="410" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">10.90 ms</text>
+  <rect x="256" y="396" width="225" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="489" y="410" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">10.90 ms</text>
   <text x="640" y="410" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="451" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Core i5-10400F</text>
   <text x="244" y="467" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">same box, Windows, Node 24</text>
-  <rect x="256" y="442" width="134" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
-  <text x="398" y="456" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">11.50 ms</text>
+  <rect x="256" y="442" width="237" height="20" rx="3" fill="url(#stale)" stroke="#6e7781" stroke-width="1"/>
+  <text x="501" y="456" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">11.50 ms</text>
   <text x="640" y="456" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.2.0, not re-measured, power state not recorded</text>
 
   <text x="244" y="497" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">Apple M4</text>
   <text x="244" y="513" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">Mac mini 2024, macOS 26, Node 22</text>
   <rect x="256" y="488" width="300" height="20" rx="3" fill="#4493f8"/>
-  <text x="564" y="502" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">25.83 ms</text>
+  <text x="564" y="502" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e6edf3">14.56 ms</text>
   <text x="640" y="502" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">v0.6.0, measured, on AC, free to boost</text>
 </svg>

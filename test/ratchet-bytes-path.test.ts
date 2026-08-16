@@ -97,7 +97,7 @@ function sampleInvite(): InvitePayload {
     kind: 'invite',
     conversationId: CONVERSATION_ID,
     sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
-    signature: randomBytes(3309),
+    certificate: randomBytes(3309),
   };
 }
 

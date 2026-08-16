@@ -140,15 +140,23 @@ function deriveAll(v: Vectors) {
   const signFixed = (msg: Uint8Array, secretKey: Uint8Array): Uint8Array =>
     ml_dsa65.sign(msg, secretKey, { extraEntropy: false });
 
-  const inviteSignature = signFixed(
-    transcript('OCX2 invite transcript v1', [
-      utf8ToBytes(v.conversationId),
-      alicePublic.classicalPublic,
-      alicePublic.pqPublic,
-      alicePublic.sigPublic,
-    ]),
-    aliceSig.secretKey,
-  );
+  // The identity certificate: over the three public keys only, no conversation
+  // id, signed once per identity rather than once per invite.
+  const certificateMessage = (identity: typeof alicePublic): Uint8Array => {
+    const lengths = new Uint8Array(12);
+    const view = new DataView(lengths.buffer);
+    view.setUint32(0, identity.classicalPublic.length, false);
+    view.setUint32(4, identity.pqPublic.length, false);
+    view.setUint32(8, identity.sigPublic.length, false);
+    return concat(
+      utf8ToBytes('OCX3 identity certificate v1'),
+      lengths,
+      identity.classicalPublic,
+      identity.pqPublic,
+      identity.sigPublic,
+    );
+  };
+  const inviteCertificate = signFixed(certificateMessage(alicePublic), aliceSig.secretKey);
   const acceptSignature = signFixed(
     transcript('OCX2 accept transcript v1', [
       utf8ToBytes(v.conversationId),
@@ -211,7 +219,7 @@ function deriveAll(v: Vectors) {
     bobPq,
     bobSig,
     bobPublic,
-    inviteSignature,
+    inviteCertificate,
     acceptSignature,
     bobRatchet1,
     aliceRatchet1,
@@ -263,7 +271,7 @@ test('vectors: all four wire tokens re-encode byte for byte', () => {
     kind: 'invite',
     sender: derived.alicePublic,
     conversationId: vectors.conversationId,
-    signature: derived.inviteSignature,
+    certificate: derived.inviteCertificate,
   });
   assert.equal(invite, vectors.tokens.invite);
 

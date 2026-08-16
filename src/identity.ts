@@ -29,12 +29,69 @@ export const MLDSA65_SIGNATURE_LEN = 3309;
  * meaning less.
  */
 const FINGERPRINT_DOMAIN = utf8ToBytes('OCX1 identity fingerprint v2');
+const CERTIFICATE_DOMAIN = utf8ToBytes('OCX3 identity certificate v1');
+
+/**
+ * The identity, signed by its own signing key, once, at creation.
+ *
+ * WHY THIS REPLACED A PER INVITE SIGNATURE. Until this landed, `beginInvite`
+ * signed the conversation id together with the sender's identity, on every
+ * single invite, at 8 ms a time. That was 8 of the 25.8 ms a handshake cost and
+ * it was buying nothing, for two reasons.
+ *
+ * First, the conversation id in there was not load bearing. It bound an invite
+ * to one conversation, and an invite was replayable verbatim anyway: the module
+ * header in handshake.ts says so and calls it a way to waste a responder's CPU
+ * rather than a way to read anything. Removing the id lets an attacker point a
+ * recorded identity at a different conversation, which is the same nuisance
+ * they already had.
+ *
+ * Second, and more importantly, neither form ever proved what people assume a
+ * signed invite proves. It is signed by the identity's OWN signing key, so it
+ * demonstrates possession of `sigSecret` and nothing about `classicalSecret` or
+ * `pqSecret`. An attacker can pair somebody else's X25519 and ML-KEM keys with
+ * a signing keypair of their own and sign either shape happily. What stops that
+ * mattering is that the resulting identity has a different FINGERPRINT, and
+ * that the responder's accept binds the initiator identity it actually saw, so
+ * the real initiator's `completeInvite` refuses. Both of those are untouched.
+ *
+ * So the signature says "these three keys are one identity, asserted by the
+ * holder of the third". That is a statement about the identity and not about
+ * the conversation, it never changes, and it is therefore computed once and
+ * carried. The MITM protection lives entirely in the accept transcript, which
+ * is per handshake and stays per handshake.
+ */
+export function certifyIdentity(identity: Omit<IdentityKeyPair, 'certificate'>): Uint8Array {
+  return ml_dsa65.sign(certificateMessage(publicOf(identity)), identity.sigSecret);
+}
+
+function certificateMessage(identity: PublicIdentity): Uint8Array {
+  const lengths = new Uint8Array(12);
+  const view = new DataView(lengths.buffer);
+  view.setUint32(0, identity.classicalPublic.length, false);
+  view.setUint32(4, identity.pqPublic.length, false);
+  view.setUint32(8, identity.sigPublic.length, false);
+  return concat(
+    CERTIFICATE_DOMAIN,
+    lengths,
+    identity.classicalPublic,
+    identity.pqPublic,
+    identity.sigPublic,
+  );
+}
+
+/** Does this identity vouch for itself? Cheap: one ML-DSA verify, about 1.5 ms. */
+export function verifyCertificate(identity: PublicIdentity, certificate: Uint8Array): boolean {
+  if (certificate.length !== MLDSA65_SIGNATURE_LEN) return false;
+  if (identity.sigPublic.length !== MLDSA65_PUBLIC_LEN) return false;
+  return ml_dsa65.verify(certificate, certificateMessage(identity), identity.sigPublic);
+}
 
 export function createIdentity(): IdentityKeyPair {
   const classical = x25519Keygen();
   const pq = ml_kem768.keygen();
   const sig = ml_dsa65.keygen();
-  return {
+  const base = {
     classicalPublic: classical.publicKey,
     classicalSecret: classical.secretKey,
     pqPublic: pq.publicKey,
@@ -42,9 +99,14 @@ export function createIdentity(): IdentityKeyPair {
     sigPublic: sig.publicKey,
     sigSecret: sig.secretKey,
   };
+  // The one signature this identity will ever need to make about itself. Paid
+  // here, once, so that every invite it sends afterwards costs no signing at
+  // all. See certifyIdentity for why a per invite signature was not buying
+  // anything the fingerprint and the accept transcript were not already.
+  return { ...base, certificate: certifyIdentity(base) };
 }
 
-export function publicOf(identity: IdentityKeyPair): PublicIdentity {
+export function publicOf(identity: Omit<IdentityKeyPair, 'certificate'>): PublicIdentity {
   return {
     classicalPublic: identity.classicalPublic,
     pqPublic: identity.pqPublic,
