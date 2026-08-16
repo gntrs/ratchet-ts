@@ -29,6 +29,7 @@ import {
   savePeers,
 } from '../cli/peers.mjs';
 import { FAILURE_CONTEXTS, explainError, explainFailure, pairWords, wrapCrypto } from '../cli/protocol.mjs';
+import { commitDescriptor, ensureHome, passphraseDescriptor } from '../cli/vault.mjs';
 import { CryptoFailureError, fingerprint, formatFingerprint } from '../dist/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -72,8 +73,26 @@ async function withHome(fn, env = {}) {
   }
 }
 
-/** A vault that seals, on every platform, with nothing asked of the host. */
-const SEALED = { RATCHET_VAULT: undefined, RATCHET_PASSPHRASE: 'correct horse battery staple' };
+/**
+ * Create a passphrase vault, the way `ratchet lock` does.
+ *
+ * Setting RATCHET_PASSPHRASE is NOT enough and that was the second wrong guess
+ * here. That variable supplies the passphrase for a vault that is ALREADY
+ * locked; it does not lock one. On a machine with a keychain the keychain wins
+ * anyway, and on a machine without one the vault falls back to plain files and
+ * the passphrase is never consulted. So the sealed test has to do what the lock
+ * command does, which is mint a descriptor and commit it.
+ *
+ * scrypt at N=2^18 is deliberately expensive, so this costs about a second. One
+ * test paying that is the price of the assertion running on every platform
+ * instead of only on the author's laptop.
+ */
+async function sealVault(passphrase = 'correct horse battery staple') {
+  await ensureHome();
+  const { descriptor, key } = passphraseDescriptor(passphrase);
+  await commitDescriptor(descriptor, key, null);
+  return key;
+}
 
 const fill = (n, b) => Buffer.alloc(n, b);
 /** X25519 is 32 bytes, ML-KEM-768 public is 1184. Fixed content, so fixed words. */
@@ -454,6 +473,7 @@ const IDENTIFYING = [HEX_A, WORDS_A, '192.168.1.42', 'Ana'];
 
 test('sealed: the file records no message content, and no plaintext about who', async () => {
   await withHome(async () => {
+    await sealVault();
     await savePeers(storeWith([{ hex: HEX_A, words: WORDS_A, address: '192.168.1.42', verified: true, label: 'Ana' }]));
     const text = await readFile(peersFile(), 'utf8');
     const raw = JSON.parse(text);
@@ -469,7 +489,10 @@ test('sealed: the file records no message content, and no plaintext about who', 
     // read either.
     assert.equal(Object.keys(raw.peers).length, 1);
     assert.equal(typeof Object.values(raw.peers)[0], 'string');
-  }, SEALED);
+    // Named, so a future change that silently stops sealing fails here rather
+    // than passing because some other backend happened to be available.
+    assert.equal(raw.protection, 'pass');
+  }, { RATCHET_VAULT: undefined, RATCHET_PASSPHRASE: 'correct horse battery staple' });
 });
 
 // The other half, and the reason the test above now names its mode.
