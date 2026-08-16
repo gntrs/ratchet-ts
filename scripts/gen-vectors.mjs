@@ -49,6 +49,7 @@ import { writeFileSync } from 'node:fs';
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
+import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import { concat, toHex, utf8ToBytes } from '../src/bytes.js';
@@ -77,6 +78,8 @@ const seeds = {
   aliceIdentityMlKem768: pattern(0x10, 64),
   bobIdentityX25519: pattern(0x20, 32),
   bobIdentityMlKem768: pattern(0x30, 64),
+  aliceIdentityMlDsa65: pattern(0xa0, 32),
+  bobIdentityMlDsa65: pattern(0xb0, 32),
   bobRatchet1X25519: pattern(0x40, 32),
   kemEncapsulationMsg: pattern(0x50, 32),
   aliceRatchet1X25519: pattern(0x60, 32),
@@ -105,17 +108,83 @@ const plaintexts = {
 
 const aliceClassical = x25519.keygen(seeds.aliceIdentityX25519);
 const alicePq = ml_kem768.keygen(seeds.aliceIdentityMlKem768);
+const aliceSig = ml_dsa65.keygen(seeds.aliceIdentityMlDsa65);
 const bobClassical = x25519.keygen(seeds.bobIdentityX25519);
 const bobPq = ml_kem768.keygen(seeds.bobIdentityMlKem768);
+const bobSig = ml_dsa65.keygen(seeds.bobIdentityMlDsa65);
+
+const alicePublic = {
+  classicalPublic: aliceClassical.publicKey,
+  pqPublic: alicePq.publicKey,
+  sigPublic: aliceSig.publicKey,
+};
+const bobPublic = {
+  classicalPublic: bobClassical.publicKey,
+  pqPublic: bobPq.publicKey,
+  sigPublic: bobSig.publicKey,
+};
+
+/**
+ * Deterministic signing, which the library itself does NOT use.
+ *
+ * FIPS 204 offers both a hedged and a deterministic mode. The hedged one mixes
+ * fresh randomness into every signature and is the right default for a real
+ * signer, because it costs nothing and it takes away a class of fault and
+ * side-channel attacks that a deterministic signer is exposed to. src/handshake
+ * therefore signs hedged, which means two invites from one identity over one
+ * conversation id are not byte identical, and that is correct.
+ *
+ * A known-answer file cannot live with that. So this generator, and only this
+ * generator, pins extraEntropy to false and produces the deterministic
+ * signature for the same key and message. The vectors pin the transcript
+ * construction, the key derivation and the encoding, which is what they are for.
+ * They deliberately do not pin the randomness of a live signature.
+ */
+const signFixed = (msg, secretKey) => ml_dsa65.sign(msg, secretKey, { extraEntropy: false });
+
+/**
+ * Mirrors transcript() in src/handshake.ts: a domain string, then a big endian
+ * u32 length for every part in order, then the parts.
+ */
+const transcript = (domain, parts) => {
+  const lengths = new Uint8Array(4 * parts.length);
+  const view = new DataView(lengths.buffer);
+  parts.forEach((part, i) => view.setUint32(i * 4, part.length, false));
+  return concat(utf8ToBytes(domain), lengths, ...parts);
+};
+
+const inviteTranscript = (id, sender) =>
+  transcript('OCX2 invite transcript v1', [
+    utf8ToBytes(id),
+    sender.classicalPublic,
+    sender.pqPublic,
+    sender.sigPublic,
+  ]);
+
+const acceptTranscript = (id, initiator, responder, kemCiphertext, ratchetPublic) =>
+  transcript('OCX2 accept transcript v1', [
+    utf8ToBytes(id),
+    initiator.classicalPublic,
+    initiator.pqPublic,
+    initiator.sigPublic,
+    responder.classicalPublic,
+    responder.pqPublic,
+    responder.sigPublic,
+    kemCiphertext,
+    ratchetPublic,
+  ]);
 
 // ---------------------------------------------------------------------------
 // Invite. Mirrors beginInvite() with the conversation id injected.
 // ---------------------------------------------------------------------------
 
+const inviteSignature = signFixed(inviteTranscript(conversationId, alicePublic), aliceSig.secretKey);
+
 const inviteToken = encodeEnvelope({
   kind: 'invite',
-  sender: { classicalPublic: aliceClassical.publicKey, pqPublic: alicePq.publicKey },
+  sender: alicePublic,
   conversationId,
+  signature: inviteSignature,
 });
 
 // ---------------------------------------------------------------------------
@@ -131,12 +200,18 @@ const dh1 = x25519.getSharedSecret(bobClassical.secretKey, aliceClassical.public
 const dh2 = x25519.getSharedSecret(bobRatchet1.secretKey, aliceClassical.publicKey);
 const handshakeRootKey = kdfHandshake(concat(dh1, dh2, kem.sharedSecret), conversationId);
 
+const acceptSignature = signFixed(
+  acceptTranscript(conversationId, alicePublic, bobPublic, kem.cipherText, bobRatchet1.publicKey),
+  bobSig.secretKey,
+);
+
 const acceptToken = encodeEnvelope({
   kind: 'accept',
-  sender: { classicalPublic: bobClassical.publicKey, pqPublic: bobPq.publicKey },
+  sender: bobPublic,
   conversationId,
   kemCiphertext: kem.cipherText,
   ratchetPublic: bobRatchet1.publicKey,
+  signature: acceptSignature,
 });
 
 // ---------------------------------------------------------------------------
@@ -235,7 +310,7 @@ const reply0Token = sealMessage(
 const bobSession = {
   conversationId,
   role: 'responder',
-  peer: { classicalPublic: aliceClassical.publicKey, pqPublic: alicePq.publicKey },
+  peer: alicePublic,
   rootKey: handshakeRootKey,
   selfRatchetPublic: bobRatchet1.publicKey,
   selfRatchetSecret: bobRatchet1.secretKey,
@@ -252,7 +327,7 @@ if (opened.plaintext !== plaintexts.message0) {
 const aliceSession = {
   conversationId,
   role: 'initiator',
-  peer: { classicalPublic: bobClassical.publicKey, pqPublic: bobPq.publicKey },
+  peer: bobPublic,
   rootKey: rootAfterAliceStep,
   selfRatchetPublic: aliceRatchet1.publicKey,
   selfRatchetSecret: aliceRatchet1.secretKey,

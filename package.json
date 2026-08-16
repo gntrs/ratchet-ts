@@ -1,6 +1,6 @@
 {
   "name": "ratchet-ts",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Hybrid X25519 + ML-KEM-768 Double Ratchet in TypeScript. Forward secrecy, post-compromise security, and post-quantum handshake. MIT.",
   "license": "MIT",
   "author": {
@@ -51,6 +51,7 @@
     "dist",
     "bin",
     "cli",
+    "relay",
     "CHANGELOG.md"
   ],
   "engines": {
@@ -67,6 +68,7 @@
     "bench": "node bench/bench.mjs",
     "prebench:wire": "tsup",
     "bench:wire": "node bench/wire.mjs",
+    "relay": "node relay/server.mjs",
     "prebench:machine": "tsup",
     "bench:machine": "node bench/machine.mjs"
   },

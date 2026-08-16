@@ -3,13 +3,14 @@ import type {
   EnvelopeKind,
   EnvelopePayload,
   EnvelopeToken,
+  IntroPayload,
   InvitePayload,
   MessagePayload,
 } from './contract.js';
 import { bytesToUtf8, fromBase64Url, toBase64Url, utf8ToBytes } from './bytes.js';
 import { fail } from './errors.js';
 
-export const ENVELOPE_VERSION = 'OCX2';
+export const ENVELOPE_VERSION = 'OCX3';
 
 /**
  * A compact binary body rather than JSON.
@@ -50,9 +51,27 @@ export const ENVELOPE_VERSION = 'OCX2';
  *
  * An OCX1 peer meeting these bytes reads 0x2? where it demanded 0x01 and reports
  * `unknown_version`, which is the whole reason the version moved.
+ *
+ * ---------------------------------------------------------------------------
+ * OCX3, AND WHY IT COSTS THE MESSAGE PATH NOTHING
+ * ---------------------------------------------------------------------------
+ *
+ * 0.6.0 put an ML-DSA-65 verifying key in every identity and a signature on
+ * both handshake frames, so the invite and the accept grew by 1952 and 5261
+ * bytes respectively. That is a large addition and it lands entirely on the two
+ * frames that happen once per conversation. The message envelope is unchanged,
+ * byte for byte: still 34 bytes of overhead, or 67 when a ratchet key rides
+ * along. A conversation pays for authentication once, not per message.
+ *
+ * The version still moved, because an OCX2 peer handed an OCX3 invite would
+ * read the identity fields it expects, then find two more length prefixed
+ * blobs where it expected the end of the body, and `r.end()` would report
+ * `malformed_token`. That is a correct refusal but a confusing one, and a peer
+ * that cannot check a signature must not silently proceed as though there were
+ * none to check. `unknown_version` says the real thing.
  */
 
-const KINDS: readonly EnvelopeKind[] = ['invite', 'accept', 'message'];
+const KINDS: readonly EnvelopeKind[] = ['invite', 'accept', 'message', 'intro'];
 
 /**
  * Accumulates the pieces of a body and then writes them out exactly once.
@@ -211,48 +230,99 @@ class Reader {
  * so a caller that already knows where the body belongs can have it written
  * there directly instead of into a temporary.
  */
-function bodyWriter(payload: InvitePayload | AcceptPayload): Writer {
+function bodyWriter(payload: InvitePayload | AcceptPayload | IntroPayload): Writer {
   const w = new Writer();
   switch (payload.kind) {
     case 'invite':
       w.text(payload.conversationId);
       w.blob(payload.sender.classicalPublic);
       w.blob(payload.sender.pqPublic);
+      w.blob(payload.sender.sigPublic);
+      w.blob(payload.signature);
       return w;
     case 'accept':
       w.text(payload.conversationId);
       w.blob(payload.sender.classicalPublic);
       w.blob(payload.sender.pqPublic);
+      w.blob(payload.sender.sigPublic);
       w.blob(payload.kemCiphertext);
       w.blob(payload.ratchetPublic);
+      w.blob(payload.signature);
+      return w;
+    case 'intro':
+      w.text(payload.conversationId);
+      w.blob(payload.sender.classicalPublic);
+      w.blob(payload.sender.pqPublic);
+      w.blob(payload.sender.sigPublic);
+      w.blob(payload.ephemeralPublic);
+      w.blob(payload.kemCiphertext);
+      w.blob(payload.ratchetPublic);
+      w.blob(payload.prekeyClassical);
+      w.blob(payload.prekeyPq);
+      w.blob(payload.signature);
       return w;
   }
 }
 
-function decodeHandshakeBody(kind: 'invite' | 'accept', body: Uint8Array): EnvelopePayload {
+function decodeHandshakeBody(kind: 'invite' | 'accept' | 'intro', body: Uint8Array): EnvelopePayload {
   const r = new Reader(body);
   switch (kind) {
     case 'invite': {
       const conversationId = r.text();
       const classicalPublic = r.blob();
       const pqPublic = r.blob();
+      const sigPublic = r.blob();
+      const signature = r.blob();
       r.end();
-      const out: InvitePayload = { kind, conversationId, sender: { classicalPublic, pqPublic } };
+      const out: InvitePayload = {
+        kind,
+        conversationId,
+        sender: { classicalPublic, pqPublic, sigPublic },
+        signature,
+      };
       return out;
     }
     case 'accept': {
       const conversationId = r.text();
       const classicalPublic = r.blob();
       const pqPublic = r.blob();
+      const sigPublic = r.blob();
       const kemCiphertext = r.blob();
       const ratchetPublic = r.blob();
+      const signature = r.blob();
       r.end();
       const out: AcceptPayload = {
         kind,
         conversationId,
-        sender: { classicalPublic, pqPublic },
+        sender: { classicalPublic, pqPublic, sigPublic },
         kemCiphertext,
         ratchetPublic,
+        signature,
+      };
+      return out;
+    }
+    case 'intro': {
+      const conversationId = r.text();
+      const classicalPublic = r.blob();
+      const pqPublic = r.blob();
+      const sigPublic = r.blob();
+      const ephemeralPublic = r.blob();
+      const kemCiphertext = r.blob();
+      const ratchetPublic = r.blob();
+      const prekeyClassical = r.blob();
+      const prekeyPq = r.blob();
+      const signature = r.blob();
+      r.end();
+      const out: IntroPayload = {
+        kind,
+        conversationId,
+        sender: { classicalPublic, pqPublic, sigPublic },
+        ephemeralPublic,
+        kemCiphertext,
+        ratchetPublic,
+        prekeyClassical,
+        prekeyPq,
+        signature,
       };
       return out;
     }
@@ -336,10 +406,10 @@ function readVarint(buf: Uint8Array, at: number): { value: number; next: number 
  * a compatible extension, and an implementation that sets it and expects to be
  * ignored is a worse outcome than a clean reject.
  */
-const BINARY_ENVELOPE_VERSION = 0x02;
-const KIND_BITS: Readonly<Record<EnvelopeKind, number>> = { invite: 1, accept: 2, message: 3 };
+const BINARY_ENVELOPE_VERSION = 0x03;
+const KIND_BITS: Readonly<Record<EnvelopeKind, number>> = { invite: 1, accept: 2, message: 3, intro: 4 };
 /** Index is the two bit kind field. 0 is unassigned and is a hard reject. */
-const KIND_BY_BITS: readonly (EnvelopeKind | undefined)[] = [undefined, 'invite', 'accept', 'message'];
+const KIND_BY_BITS: readonly (EnvelopeKind | undefined)[] = [undefined, 'invite', 'accept', 'message', 'intro'];
 const FLAG_RATCHET_KEY = 0x02;
 const FLAG_RESERVED = 0x01;
 /** Poly1305. Spelled out rather than imported so this file reads standalone. */

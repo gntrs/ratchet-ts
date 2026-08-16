@@ -21,7 +21,7 @@ test('happy path: invite, auto-accept, and a two way conversation', async () => 
     const from = line.from === 'alice' ? alice : bob;
     const to = line.from === 'alice' ? bob : alice;
     const token = await send(from, line.text);
-    assert.ok(token.startsWith('OCX2.message.'), 'tokens must be self describing');
+    assert.ok(token.startsWith('OCX3.message.'), 'tokens must be self describing');
     assert.equal(await receive(to, token), line.text);
   }
 

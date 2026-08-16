@@ -5,6 +5,8 @@ import { bytesToUtf8, concat, equal, fromBase64Url, toBase64Url, utf8ToBytes } f
 import { ENVELOPE_VERSION } from './envelope.js';
 import { fail } from './errors.js';
 import {
+  MLDSA65_PUBLIC_LEN,
+  MLDSA65_SECRET_LEN,
   MLKEM768_PUBLIC_LEN,
   MLKEM768_SECRET_LEN,
   X25519_PUBLIC_LEN,
@@ -307,6 +309,7 @@ export function serializeSession(session: SessionState): string {
   w.u8(session.role === 'initiator' ? 0 : 1);
   w.blob(session.peer.classicalPublic);
   w.blob(session.peer.pqPublic);
+  w.blob(session.peer.sigPublic);
   w.blob(session.rootKey);
   w.blob(session.selfRatchetPublic);
   w.blob(session.selfRatchetSecret);
@@ -350,11 +353,13 @@ export function deserializeSession(value: string): SessionState {
 
   const classicalPublic = r.blob();
   const pqPublic = r.blob();
+  const sigPublic = r.blob();
   const rootKey = r.blob();
   const selfRatchetPublic = r.blob();
   const selfRatchetSecret = r.blob();
   requireLength(classicalPublic, X25519_PUBLIC_LEN, 'peer classical public key');
   requireLength(pqPublic, MLKEM768_PUBLIC_LEN, 'peer ML-KEM public key');
+  requireLength(sigPublic, MLDSA65_PUBLIC_LEN, 'peer ML-DSA public key');
   requireLength(rootKey, KEY_LEN, 'root key');
   requireLength(selfRatchetPublic, X25519_PUBLIC_LEN, 'ratchet public key');
   requireLength(selfRatchetSecret, X25519_SECRET_LEN, 'ratchet secret key');
@@ -399,7 +404,7 @@ export function deserializeSession(value: string): SessionState {
   return {
     conversationId,
     role,
-    peer: { classicalPublic, pqPublic },
+    peer: { classicalPublic, pqPublic, sigPublic },
     rootKey,
     selfRatchetPublic,
     selfRatchetSecret,
@@ -432,6 +437,7 @@ export function serializePending(pending: PendingSession): string {
   // here could never carry information, it could only ever be wrong.
   w.blob(pending.selfIdentitySnapshot.classicalPublic);
   w.blob(pending.selfIdentitySnapshot.pqPublic);
+  w.blob(pending.selfIdentitySnapshot.sigPublic);
   w.text(pending.createdAt);
   return encodeState('pending', w.finish());
 }
@@ -441,14 +447,16 @@ export function deserializePending(value: string): PendingSession {
   const conversationId = r.text();
   const classicalPublic = r.blob();
   const pqPublic = r.blob();
+  const sigPublic = r.blob();
   const createdAt = r.text();
   r.end();
   requireLength(classicalPublic, X25519_PUBLIC_LEN, 'snapshot classical public key');
   requireLength(pqPublic, MLKEM768_PUBLIC_LEN, 'snapshot ML-KEM public key');
+  requireLength(sigPublic, MLDSA65_PUBLIC_LEN, 'snapshot ML-DSA public key');
   return {
     conversationId,
     role: 'initiator',
-    selfIdentitySnapshot: { classicalPublic, pqPublic },
+    selfIdentitySnapshot: { classicalPublic, pqPublic, sigPublic },
     createdAt,
   };
 }
@@ -478,6 +486,8 @@ export function exportIdentity(identity: IdentityKeyPair): string {
   w.blob(identity.classicalSecret);
   w.blob(identity.pqPublic);
   w.blob(identity.pqSecret);
+  w.blob(identity.sigPublic);
+  w.blob(identity.sigSecret);
   return encodeState('identity', w.finish());
 }
 
@@ -487,10 +497,14 @@ export function importIdentity(value: string): IdentityKeyPair {
   const classicalSecret = r.blob();
   const pqPublic = r.blob();
   const pqSecret = r.blob();
+  const sigPublic = r.blob();
+  const sigSecret = r.blob();
   r.end();
   requireLength(classicalPublic, X25519_PUBLIC_LEN, 'classical public key');
   requireLength(classicalSecret, X25519_SECRET_LEN, 'classical secret key');
   requireLength(pqPublic, MLKEM768_PUBLIC_LEN, 'ML-KEM public key');
   requireLength(pqSecret, MLKEM768_SECRET_LEN, 'ML-KEM secret key');
-  return { classicalPublic, classicalSecret, pqPublic, pqSecret };
+  requireLength(sigPublic, MLDSA65_PUBLIC_LEN, 'ML-DSA public key');
+  requireLength(sigSecret, MLDSA65_SECRET_LEN, 'ML-DSA secret key');
+  return { classicalPublic, classicalSecret, pqPublic, pqSecret, sigPublic, sigSecret };
 }

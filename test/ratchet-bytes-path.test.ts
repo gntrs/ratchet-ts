@@ -96,7 +96,8 @@ function sampleInvite(): InvitePayload {
   return {
     kind: 'invite',
     conversationId: CONVERSATION_ID,
-    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184) },
+    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
+    signature: randomBytes(3309),
   };
 }
 
@@ -104,9 +105,10 @@ function sampleAccept(): AcceptPayload {
   return {
     kind: 'accept',
     conversationId: CONVERSATION_ID,
-    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184) },
+    sender: { classicalPublic: randomBytes(32), pqPublic: randomBytes(1184), sigPublic: randomBytes(1952) },
     kemCiphertext: randomBytes(1088),
     ratchetPublic: randomBytes(32),
+    signature: randomBytes(3309),
   };
 }
 

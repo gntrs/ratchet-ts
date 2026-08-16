@@ -321,6 +321,17 @@ const REASONS = {
   identity_mismatch: {
     transfer: 'the reply answers an invite from a different identity, so something re-addressed the handshake',
   },
+  // The only reason in this table that names an attacker as the FIRST
+  // explanation rather than the last. Every other failure here has a boring
+  // cause that is more likely than malice: a dropped frame, a stale session, a
+  // resent packet. A signature that does not verify has no boring cause. The
+  // bytes were signed by a key, that key is in the same frame, and the two do
+  // not agree, which means the frame was built by somebody who could not sign
+  // as the identity they are claiming.
+  bad_signature: {
+    transfer: 'the handshake is signed by the wrong key, so the machine on the other end is not who the frame says it is',
+    chat: 'the handshake is signed by the wrong key, so whoever answered is not who the frame says they are',
+  },
 };
 
 /** Every context REASONS is written for, so a test can walk all of them. */
@@ -613,6 +624,27 @@ function announce(onHandshake, peerWords, sessionWords, handshakeMs, peerHex) {
   }
 }
 
+
+/**
+ * The one callback that is allowed to stop a transfer.
+ *
+ * `announce` above swallows everything a banner throws, on purpose: a rendering
+ * bug must never cost somebody their file. That makes onHandshake exactly the
+ * wrong place to put a security decision, and it was tried there first. The
+ * pairing code check went in as a banner, the banner threw on a mismatched
+ * peer, the catch above ate it, and the file went to the wrong machine anyway.
+ * The end to end test caught it; nothing else would have.
+ *
+ * So this is separate, awaited, and deliberately not wrapped. It runs after the
+ * handshake and before the header is sealed, which is the last moment at which
+ * refusing costs nothing: the peer has proved who it is and no plaintext has
+ * been committed to the wire.
+ */
+async function gateOnPeer(verifyPeer, peerWords, peerHex, peerIdentity) {
+  if (typeof verifyPeer !== 'function') return;
+  await verifyPeer({ peerWords, peerHex, peerIdentity });
+}
+
 /**
  * Progress is cosmetic. Awaiting it would let a slow renderer throttle the
  * transfer, so a returned promise is dropped and a thrown callback is ignored.
@@ -650,7 +682,7 @@ function expectedChunks(size, chunkSize) {
  * `bytes` is borrowed, never modified. Subarrays are views into it, which is
  * why a 4 MiB payload does not become 8 MiB of resident memory.
  */
-export async function sendPayload({ channel, identity, name, bytes, chunkSize, onProgress, onHandshake }) {
+export async function sendPayload({ channel, identity, name, bytes, chunkSize, onProgress, onHandshake, verifyPeer }) {
   const payload = bytes ?? new Uint8Array(0);
   const size = payload.length;
   const chunk = clampChunkSize(chunkSize);
@@ -685,6 +717,8 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
   const peerWords = formatFingerprint(peerPrint);
   const sessionWords = pairWords(identity, session.peer);
   announce(onHandshake, peerWords, sessionWords, handshakeMs, peerPrint.hex);
+  // Can refuse. See gateOnPeer: the banner above cannot, by design.
+  await gateOnPeer(verifyPeer, peerWords, peerPrint.hex, session.peer);
 
   const sha256 = sha256Hex(payload);
   const header = JSON.stringify({
@@ -810,7 +844,7 @@ export async function sendPayload({ channel, identity, name, bytes, chunkSize, o
  * Returns the assembled bytes rather than writing them, because where the file
  * lands is a CLI decision and this module should not own the filesystem.
  */
-export async function receivePayload({ channel, identity, onProgress, onHandshake }) {
+export async function receivePayload({ channel, identity, onProgress, onHandshake, verifyPeer }) {
   const clock = { ms: 0 };
   const handshakeStart = performance.now();
 
@@ -844,6 +878,8 @@ export async function receivePayload({ channel, identity, onProgress, onHandshak
   const peerWords = formatFingerprint(peerPrint);
   const sessionWords = pairWords(identity, session.peer);
   announce(onHandshake, peerWords, sessionWords, handshakeMs, peerPrint.hex);
+  // Can refuse. See gateOnPeer: the banner above cannot, by design.
+  await gateOnPeer(verifyPeer, peerWords, peerPrint.hex, session.peer);
 
   // Starts before the await, so it includes the sender's turnaround. That is
   // the same span the sender measures, give or take one network hop.
