@@ -39,19 +39,41 @@ const ROOT = join(HERE, '..');
  * environment on every call rather than at import, so this is enough to keep a
  * test out of the user's real ~/.ratchet, and there is no ordering hazard
  * between tests as long as each one restores what it found.
+ *
+ * It also pins the VAULT, and that is not tidiness. Whether savePeers writes a
+ * sealed file or a plain one depends on whether this machine has a working
+ * keychain, so a test that does not say which it wants is testing whatever the
+ * runner happens to have. That is exactly how the shape assertion below passed
+ * on macOS and failed on CI for a week: the developer machine had a keychain,
+ * the Linux runner had no keyring, and the file legitimately came out in the
+ * documented unprotected shape.
  */
-async function withHome(fn) {
-  const before = process.env.RATCHET_HOME;
+const VAULT_ENV = ['RATCHET_HOME', 'RATCHET_VAULT', 'RATCHET_PASSPHRASE'];
+
+async function withHome(fn, env = {}) {
+  const before = Object.fromEntries(VAULT_ENV.map((name) => [name, process.env[name]]));
   const dir = await mkdtemp(join(tmpdir(), 'ratchet-peers-'));
   process.env.RATCHET_HOME = dir;
+  // Default to the unprotected path, which is the one that needs nothing from
+  // the host. Tests that care about sealing ask for a passphrase explicitly.
+  const wanted = { RATCHET_VAULT: 'none', RATCHET_PASSPHRASE: undefined, ...env };
+  for (const [name, value] of Object.entries(wanted)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
   try {
     return await fn(dir);
   } finally {
-    if (before === undefined) delete process.env.RATCHET_HOME;
-    else process.env.RATCHET_HOME = before;
+    for (const [name, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+/** A vault that seals, on every platform, with nothing asked of the host. */
+const SEALED = { RATCHET_VAULT: undefined, RATCHET_PASSPHRASE: 'correct horse battery staple' };
 
 const fill = (n, b) => Buffer.alloc(n, b);
 /** X25519 is 32 bytes, ML-KEM-768 public is 1184. Fixed content, so fixed words. */
@@ -428,7 +450,9 @@ test('the write leaves no temp file behind', async () => {
   });
 });
 
-test('the file records no message content, and no plaintext about who', async () => {
+const IDENTIFYING = [HEX_A, WORDS_A, '192.168.1.42', 'Ana'];
+
+test('sealed: the file records no message content, and no plaintext about who', async () => {
   await withHome(async () => {
     await savePeers(storeWith([{ hex: HEX_A, words: WORDS_A, address: '192.168.1.42', verified: true, label: 'Ana' }]));
     const text = await readFile(peersFile(), 'utf8');
@@ -437,7 +461,7 @@ test('the file records no message content, and no plaintext about who', async ()
 
     // The whole target property, asserted the blunt way: none of the four things
     // that identify a human survive as readable text in this file.
-    for (const secret of [HEX_A, WORDS_A, '192.168.1.42', 'Ana']) {
+    for (const secret of IDENTIFYING) {
       assert.equal(text.includes(secret), false, `${secret} is readable in peers.json`);
     }
     // One row per peer and nothing else: a copy without the key is a count.
@@ -445,6 +469,40 @@ test('the file records no message content, and no plaintext about who', async ()
     // read either.
     assert.equal(Object.keys(raw.peers).length, 1);
     assert.equal(typeof Object.values(raw.peers)[0], 'string');
+  }, SEALED);
+});
+
+// The other half, and the reason the test above now names its mode.
+//
+// On a machine with no keychain and no passphrase, the vault has nothing to
+// seal with and 0.5.0 chose to fall back to plain files rather than refuse to
+// run. That is a defensible choice and it is documented. What was NOT
+// documented is that the privacy property the test above asserts simply does
+// not hold there, and because CI runs on a keyring-less Linux box, the suite
+// was silently exercising the unprotected path while claiming to prove the
+// protected one.
+//
+// So this asserts what is actually true in the fallback: the data IS readable.
+// A test that says so out loud is worth more than one that quietly never runs.
+test('unprotected: the fallback file is plain, and this is what that costs', async () => {
+  await withHome(async () => {
+    await savePeers(storeWith([{ hex: HEX_A, words: WORDS_A, address: '192.168.1.42', verified: true, label: 'Ana' }]));
+    const text = await readFile(peersFile(), 'utf8');
+    const raw = JSON.parse(text);
+
+    assert.deepEqual(Object.keys(raw).sort(), ['note', 'peers', 'protection', 'v']);
+    assert.equal(raw.protection, 'none');
+    // No salt, because there is no index key to salt an index with.
+    assert.equal(raw.salt, undefined);
+    // The peer is filed under its own hex and its fields are readable. If this
+    // ever stops being true, the fallback started sealing and this test should
+    // become the sealed one rather than being deleted.
+    assert.ok(Object.keys(raw.peers).includes(HEX_A));
+    for (const readable of IDENTIFYING) {
+      assert.ok(text.includes(readable), `${readable} should be readable in the unprotected file`);
+    }
+    // And the file says so to whoever opens it, rather than looking sealed.
+    assert.match(raw.note, /not|no|plain|unprotected/i);
   });
 });
 
