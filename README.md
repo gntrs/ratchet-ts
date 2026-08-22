@@ -137,6 +137,21 @@ npm install ratchet-ts
 Runtime deps, all MIT: `@noble/curves`, `@noble/ciphers`, `@noble/hashes`,
 `@noble/post-quantum`.
 
+### Check the package before you trust it
+
+From 0.6.1 every release is published from GitHub Actions with a Sigstore
+provenance attestation, so the tarball on npm carries a signed statement naming
+the exact commit and workflow that built it, countersigned into a public
+transparency log. You do not have to take the author's word that the code you
+are reading here is the code npm served you:
+
+```sh
+npm audit signatures
+```
+
+That is worth more than any assurance in this README, because it does not
+involve believing the README.
+
 ## Send a file between two machines
 
 The package ships a `ratchet` command. Two machines, two commands, no account
