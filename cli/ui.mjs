@@ -805,7 +805,7 @@ function titleBar(s, st, g, cols) {
   // terminal too narrow for both it survives alone.
   if (stringWidth(right) + 4 > cols) return pad(clip(right, cols), cols);
 
-  // The address goes whole or not at all. Half of 192.168.1.24:4477 is an
+  // The address goes whole or not at all. Half of 192.168.1.42:4477 is an
   // address nobody can act on, and this CLI already has a house rule against
   // printing one of those. See DESIGN-CLI.md.
   const room = cols - stringWidth(right) - 1;

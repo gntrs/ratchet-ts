@@ -5,6 +5,78 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Nothing here changes the wire format or the API. It is all evidence, which is
+what this release cycle is about: the protocol was only ever checked by its
+author, in one language, against his own vectors.
+
+### Added
+
+- **SPEC.md.** The protocol defined completely enough to implement from
+  scratch, in any language, without reading `src/`. State machines for both
+  handshakes, every KDF label verbatim, the message header as an offset table,
+  the AAD layout, and two sections that matter as much as the rest: what OCX3
+  claims, and what it explicitly does not.
+- **`verify/verify.py`, an independent implementation of the key schedule.**
+  Python, using OpenSSL through `cryptography` and the pure Python FIPS 203
+  implementation in `kyber-py`. It imports nothing from this repository and
+  shares no code with `@noble`. It re-derives every value in `test/vectors.json`
+  from the seeds alone, checks that both sides of the handshake reach the same
+  root by different routes, and opens both wire tokens by rebuilding the AAD
+  from scratch. 28 checks, all passing, and it runs in CI on every push.
+  This is what turns `test/vectors.json` from a description of whatever the
+  TypeScript happens to do into a specification of a protocol.
+- **`test/kat-primitives.test.ts`.** Published known-answer vectors from RFC
+  7748, RFC 5869, RFC 4231 and RFC 8439, taken from the RFC text. They run
+  against this library's own backend wrappers rather than against `@noble`
+  directly, because the wrappers are what a user depends on and a wrapper can be
+  wrong in ways the library underneath is not. Writing them caught a real
+  argument order mistake in a first draft, which is the kind of thing they
+  exist for. The repository now demonstrates conformance instead of citing it.
+- **`verify/go`, a third implementation, in Go.** Checked against the Go
+  standard library's `crypto/mlkem` and `crypto/hkdf` rather than against a
+  chosen package, which is a stronger statement because nobody picked it to
+  make this repository look good. 26 checks. Go exposes no deterministic
+  encapsulation by design, so it verifies key generation and decapsulation, the
+  receiving side of the exchange, while `verify.py` covers the sending side.
+  Between them both directions are covered and neither pretends otherwise.
+- Screenshots in `docs/shots/`, generated from captured output by a script
+  rather than photographed, so no path, hostname or address can end up in an
+  image by accident. The capture used a sandboxed `RATCHET_HOME`, and those
+  throwaway keys were overwritten and deleted afterwards.
+- `SPEC.md` and `SECURITY.md` ship in the npm tarball.
+
+### Removed
+
+- **The maintainer's personal email address, from SECURITY.md.** Private
+  vulnerability reports go through GitHub Security Advisories, which is a
+  better channel anyway: it keeps the disclosure timeline and any eventual CVE
+  in one place instead of in an inbox, and a personal address in a public
+  repository gets scraped. This is not retroactive. The address is still in the
+  git history and in every npm tarball up to 0.6.1, and nothing can take it out
+  of those.
+- The example address in the docs and the CLI tests was a real address from the
+  machine it was written on. It is now the `192.168.1.42` placeholder
+  everywhere. Also not retroactive, and an RFC1918 address is not routable, so
+  this is tidiness rather than a fix for anything.
+
+### Changed
+
+- **The README is now a README.** It was 1690 lines of lab notebook, which is
+  excellent as a record and a wall as a front door. The notebook moved intact to
+  `NOTEBOOK.md`, nothing deleted, and the new README is 178 lines: what it is,
+  a working example, how to check the thing yourself, where it is, what is next.
+- CI actions moved to `@v5`, clearing the Node 20 deprecation warnings.
+- **The benchmark was reporting the wrong overhead number, twice over.** It
+  printed the base64url token length while every other document talks about the
+  binary wire, and it sampled message 0 and called the result constant. The
+  first three messages of a chain carry a 32 byte ratchet key that later ones
+  omit, so overhead drops after message 2 and stays down. It now reports all
+  four numbers: +34 bytes steady on the wire, +67 with the key, +144 and +188
+  for the text form. The README's 34 and 67 were right all along; the benchmark
+  was measuring something else and labelling it badly.
+
 ## [0.6.1] - 2026-08-21
 
 The first release of the 0.6 line to actually reach npm. 0.6.0 has an entry

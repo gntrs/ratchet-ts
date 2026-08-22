@@ -31,7 +31,7 @@ const SIZE = { cols: 80, rows: 24 };
 function base() {
   const s = blankState();
   s.color = false;
-  s.peerAddress = '192.168.1.24:4477';
+  s.peerAddress = '192.168.1.42:4477';
   // Twelve words, because that is what cli/protocol.mjs now produces: the two
   // identity fingerprints concatenated, not a hash of the pair.
   s.sessionWords = 'scan fiber black abstract cradle struggle goat window faint climb gossip process';
@@ -71,7 +71,7 @@ test('steady state, verified peer: four rows of chrome and the rest is transcrip
   assert.equal(
     frame(verified()),
     [
-      ' ratchet chat  ·  192.168.1.24:4477             ✓ verified "laptop"  ·  pq live ',
+      ' ratchet chat  ·  192.168.1.42:4477             ✓ verified "laptop"  ·  pq live ',
       '─'.repeat(80),
       ' '.repeat(80),
       ' '.repeat(80),
@@ -165,7 +165,7 @@ test('the changed key alarm says what leaked, keeps the code, and keeps both way
   };
   s.alarm = {
     kind: 'changed',
-    title: 'the key at 192.168.1.24:4477 is not the one you verified',
+    title: 'the key at 192.168.1.42:4477 is not the one you verified',
     body: [
       { kind: 'words', label: 'you verified as "laptop"', words: s.trust.conflict.words, hex: 'aaaa1111bbbb2222' },
       { kind: 'words', label: 'answering now', words: s.peerWords, hex: 'ffff0000ffff0000' },
@@ -185,7 +185,7 @@ test('the changed key alarm says what leaked, keeps the code, and keeps both way
   };
   const text = frame(s);
 
-  assert.match(text, /the key at 192\.168\.1\.24:4477 is not the one you verified/);
+  assert.match(text, /the key at 192\.168\.1\.42:4477 is not the one you verified/);
   assert.match(text, /went to the NEW key/);
   assert.match(text, /reason code: peer_key_changed/);
   assert.match(text, /\/trust new/);
@@ -293,7 +293,7 @@ test('60 columns: the badge survives, the address is dropped whole', () => {
   for (const row of rows) assert.equal(stringWidth(row), 60);
   assert.match(rows[0], /verified "laptop"/);
   // Half an address is worse than none: nobody can tell 192.168.1.2 from
-  // 192.168.1.24 once the tail is gone.
+  // 192.168.1.42 once the tail is gone.
   assert.doesNotMatch(rows[0], /192\.168\.1\.2\b/);
 });
 

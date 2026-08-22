@@ -43,9 +43,13 @@ or fund an audit of this code.
 
 Please report suspected vulnerabilities privately, not through a public issue.
 
-- Open a private advisory via GitHub Security Advisories on this repository, or
-- Email **239629917+gntrs@users.noreply.github.com** with `ratchet-ts security` in the
-  subject.
+Use **[GitHub Security Advisories](https://github.com/gntrs/ratchet-ts/security/advisories/new)**
+on this repository. That is a private channel: the report is visible only to you
+and the maintainer until it is published, and it keeps the disclosure timeline
+and the eventual CVE in one place rather than in an inbox.
+
+There is deliberately no email address here. A personal address in a public
+repository gets scraped, and an advisory is a better channel for this anyway.
 
 Include enough detail to reproduce: affected version, a description of the
 issue, and a proof of concept if you have one. You will get an acknowledgement

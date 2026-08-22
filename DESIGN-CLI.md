@@ -51,7 +51,7 @@ is two commands, in the order they get typed, on the two machines they get
 typed on. Everything else is behind `--help`.
 
 **Every error ends with the next command to run.** Not "connection refused".
-"Nothing is listening on 192.168.1.24:4477. On that machine, run: ratchet recv
+"Nothing is listening on 192.168.1.42:4477. On that machine, run: ratchet recv
 --out ." An error that does not tell you what to do next is an error you have
 to search for.
 
