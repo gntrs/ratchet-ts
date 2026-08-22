@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="623" height="363" viewBox="0 0 623 363" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13.5">
+<rect width="623" height="363" rx="10" fill="#0d1117"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/><circle cx="44" cy="20" r="6" fill="#febc2e"/><circle cx="64" cy="20" r="6" fill="#28c840"/>
+<text x="311.5" y="25" fill="#6e7681" font-size="12" text-anchor="middle">npm test  ·  what the suite actually proves</text>
+<text x="22.0" y="56.0" fill="#5c6370" xml:space="preserve">$&#160;npm&#160;test</text>
+<text x="22.0" y="94.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="94.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;RFC&#160;7748&#160;section&#160;5.2:&#160;X25519&#160;scalar&#160;multiplication&#160;known&#160;answers</text>
+<text x="22.0" y="113.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="113.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;RFC&#160;5869&#160;appendix&#160;A:&#160;HKDF-SHA256&#160;known&#160;answers</text>
+<text x="22.0" y="132.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="132.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;RFC&#160;4231&#160;section&#160;4:&#160;HMAC-SHA512&#160;known&#160;answers</text>
+<text x="22.0" y="151.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="151.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;RFC&#160;8439&#160;section&#160;2.8.2:&#160;the&#160;AEAD_CHACHA20_POLY1305&#160;known&#160;answer</text>
+<text x="22.0" y="170.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="170.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;HYBRID&#160;PIN:&#160;the&#160;ML-KEM&#160;secret&#160;alone&#160;changes&#160;the&#160;root&#160;key,&#160;X2551...</text>
+<text x="22.0" y="189.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="189.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;LIVE&#160;HANDSHAKE:&#160;the&#160;responder&#160;root&#160;key&#160;really&#160;contains&#160;the&#160;deca...</text>
+<text x="22.0" y="208.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="208.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;all&#160;four&#160;legs&#160;of&#160;the&#160;offline&#160;prekey&#160;handshake&#160;are&#160;load&#160;bearing</text>
+<text x="22.0" y="227.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="227.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;a&#160;session&#160;whose&#160;root&#160;was&#160;derived&#160;without&#160;the&#160;ML-KEM&#160;leg&#160;cannot&#160;...</text>
+<text x="22.0" y="246.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="246.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;substituting&#160;the&#160;ML-KEM&#160;ciphertext&#160;is&#160;caught&#160;by&#160;the&#160;accept&#160;sign...</text>
+<text x="22.0" y="265.0" fill="#98c379" xml:space="preserve">&#160;&#160;ok</text>
+<text x="54.2" y="265.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;vectors:&#160;the&#160;real&#160;ratchet&#160;opens&#160;the&#160;vector&#160;tokens</text>
+<text x="22.0" y="284.0" fill="#5c6370" xml:space="preserve">&#160;&#160;..&#160;&#160;and&#160;304&#160;more</text>
+<text x="22.0" y="322.0" fill="#c9d1d9" font-weight="bold" xml:space="preserve">&#160;&#160;314&#160;passing,&#160;0&#160;failing</text>
+<text x="215.2" y="322.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;&#160;node&#160;20/22/24,&#160;bun,&#160;deno</text>
+</svg>

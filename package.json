@@ -53,7 +53,9 @@
     "bin",
     "cli",
     "relay",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "SPEC.md",
+    "SECURITY.md"
   ],
   "engines": {
     "node": ">=20"
