@@ -5,6 +5,62 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-21
+
+The first release of the 0.6 line to actually reach npm. 0.6.0 has an entry
+below and a finished implementation, and it was never published: four fixes
+landed after it was written, one of them a behaviour change, so publishing the
+tree under that number would have shipped something the 0.6.0 entry does not
+describe. npm therefore goes from 0.5.0 straight to 0.6.1, and this paragraph
+is the reason rather than a gap anyone has to guess at.
+
+### Added
+
+- **A release workflow that publishes with Sigstore provenance.** npm now
+  records a signed statement naming the exact commit, workflow and runner that
+  built the tarball, countersigned into a public transparency log. Reading the
+  source here and trusting the bytes on npm used to be two separate acts of
+  faith joined by the author's word. `npm audit signatures` now joins them for
+  you. Publishing authenticates through npm trusted publishing, so there is no
+  npm token in this repository and no long lived credential to leak. The
+  attestation itself comes from the OIDC identity of the workflow run and would
+  be identical under a token, so the two are worth stating separately: trusted
+  publishing is what removes the credential, provenance is what makes the
+  tarball checkable.
+- **`test/leg-isolation.test.ts`.** Every leg of both handshakes is proved load
+  bearing by breaking it: the two X25519 legs of the live handshake, the
+  conversation id binding, all four secrets of the offline prekey handshake,
+  the order they are concatenated in, and the downgrade surface. Each test runs
+  the real handshake, takes the root key the live session actually holds, and
+  re-derives it from outside. The reconstruction with every leg present must
+  match byte for byte; every reconstruction with a leg dropped, zeroed or
+  substituted must miss.
+
+### Fixed
+
+- **SECURITY.md was describing a version of this library that no longer
+  existed.** It said no test isolates the ML-KEM-768 contribution to the root
+  key, and that a silently dropped post-quantum leg would leave the suite
+  green. `test/hybrid.test.ts` had already made that false. The correction
+  matters more than the original claim did: the one document a sceptical reader
+  opens first was understating the work, in the direction that costs trust. It
+  now names the tests, describes the method, and states plainly what the tests
+  do not prove.
+- SECURITY.md named the wire format as `OCX1`. It has been `OCX3` since 0.6.0.
+- The primitive list in SECURITY.md omitted ML-DSA-65 and still said
+  HMAC-SHA256, which 0.4.0 replaced with HMAC-SHA512.
+
+### Verified
+
+- Both leg files were checked by mutation, not by being green. `src/handshake.ts`
+  and `src/prekeys.ts` were edited to drop the ML-KEM secret from the ikm in all
+  four places it is mixed. Seven tests went red across the two files. The two
+  that stayed green are the two that test whether an attacker on the wire can
+  remove the post-quantum arm, which a build that voluntarily stopped mixing it
+  is outside the reach of. A test that has never been shown to fail is a
+  decoration.
+- 308 tests pass on Node 24, macOS, Apple Silicon.
+
 ## [0.6.0] - 2026-08-15
 
 The four things the roadmap has listed for months, done in one release: the
