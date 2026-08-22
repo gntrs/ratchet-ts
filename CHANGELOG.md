@@ -5,11 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.2] - 2026-08-22
 
-Nothing here changes the wire format or the API. It is all evidence, which is
-what this release cycle is about: the protocol was only ever checked by its
-author, in one language, against his own vectors.
+Nothing here changes the wire format or the API, so a 0.6.1 peer and a 0.6.2
+peer talk normally and no fingerprint moves. It is all evidence, which is what
+this release is about. Until today the protocol had only ever been checked by
+its author, in one language, against his own vectors, and there was no way for
+a reader to tell a correct design from a consistently wrong one. There are now
+three independent implementations, a specification they were written from, and
+the standards' own test vectors running against the primitives.
+
+Measured on an Apple M4, Node 20, 11 runs, on a machine that was not idle:
+keygen 11.75 ms median, handshake 16.69 ms, seal 6 us and open 5 us at a 256
+byte payload. The README carries both machines rather than the flattering one.
 
 ### Added
 

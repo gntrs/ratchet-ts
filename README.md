@@ -138,15 +138,30 @@ in CI on every push rather than promised here.
 | | |
 | --- | --- |
 | Tests | 314 |
-| Overhead per message | 34 bytes, 67 when a ratchet key rides along |
-| Seal, 256 B payload, p50 | 16.36 us |
-| Handshake | 25.8 ms, two ML-DSA-65 signatures, once per conversation |
+| Overhead per message | 34 bytes on the wire, 67 while a ratchet key rides along |
 | Independent verifiers | Python, Go and Rust, all in CI |
 | Published with provenance | Yes, from 0.6.1 |
 
-Measured on an AMD Ryzen 5 7530U, Node v25.8.0, native backends. Method, machine
-variance and the numbers that turned out to be wrong are all in
-[NOTEBOOK.md](./NOTEBOOK.md).
+Two machines, because one machine is an anecdote. Medians, with the best run
+beside them, since neither box was idle and the best run is the least
+contaminated sample rather than the prettiest one.
+
+| | Apple M4, Node 20 | Ryzen 5 7530U, Node 25 |
+| --- | --- | --- |
+| keygen | 11.75 ms _(best 10.85)_ | not measured |
+| handshake | 16.69 ms _(best 15.33)_ | 25.8 ms |
+| seal, 256 B | 6 us _(p95 11 us)_ | 16.36 us |
+| open, 256 B | 5 us _(p95 10 us)_ | not measured |
+
+The handshake is the expensive one and it is expensive on purpose: it carries
+two ML-DSA-65 signatures, which is roughly 29 times the pre-0.6.0 cost. It
+happens once per conversation and is still invisible next to a network round
+trip. Per message costs are unaffected.
+
+The M4 column is 11 runs. Its handshake spread was 36 percent, which is one
+outlier at 21.35 ms on a machine also running a browser and a music player, not
+a property of the code. Method, machine variance, and the numbers that turned
+out to be wrong are all in [NOTEBOOK.md](./NOTEBOOK.md).
 
 **Done so far**
 
