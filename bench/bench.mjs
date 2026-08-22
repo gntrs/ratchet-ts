@@ -73,7 +73,13 @@ async function oneRun() {
   const msg = 'x'.repeat(256);
   const sealMs = [];
   const openMs = [];
-  let overhead = 0;
+  // Four numbers, not one, because the old single number was wrong twice over.
+  // It reported the base64url TOKEN length while the README talks about the
+  // BINARY wire, and it sampled message 0 and called the result constant. The
+  // first RATCHET_KEY_RESEND messages of a chain carry a 32 byte ratchet key
+  // that later ones omit, so overhead drops after message 2 and stays down.
+  // Measuring both forms, on both sides of that step, is the honest version.
+  const overhead = { binaryWithKey: 0, binarySteady: 0, tokenWithKey: 0, tokenSteady: 0 };
   for (let i = 0; i < 2000; i++) {
     const t0 = performance.now();
     const sealed = await engine.seal(aliceSession, msg);
@@ -84,8 +90,19 @@ async function oneRun() {
     openMs.push(t2 - t1);
     aliceSession = sealed.session;
     bobSession = opened.session;
-    if (i === 0) {
-      overhead = Buffer.byteLength(sealed.token, 'utf8') - Buffer.byteLength(msg, 'utf8');
+    // Message 0 still carries the ratchet key; message 5 is safely past the
+    // resend window, so it is the steady state every later message shares.
+    if (i === 0 || i === 5) {
+      const wire = await engine.sealToEnvelopeBytes(aliceSession, msg);
+      const binary = (wire.bytes ?? wire.envelope).length - Buffer.byteLength(msg, 'utf8');
+      const token = Buffer.byteLength(sealed.token, 'utf8') - Buffer.byteLength(msg, 'utf8');
+      if (i === 0) {
+        overhead.binaryWithKey = binary;
+        overhead.tokenWithKey = token;
+      } else {
+        overhead.binarySteady = binary;
+        overhead.tokenSteady = token;
+      }
     }
   }
   out['seal (256 B)'] = stats(sealMs);
@@ -142,4 +159,12 @@ console.table(
   }),
 );
 
-console.log(`ciphertext overhead: +${runs[0].overhead} bytes per message (constant)\n`);
+const ov = runs[0].overhead;
+console.log(
+  `envelope overhead, binary wire: +${ov.binarySteady} bytes steady, ` +
+    `+${ov.binaryWithKey} while the ratchet key rides along (first 3 of a chain)`,
+);
+console.log(
+  `envelope overhead, base64url token: +${ov.tokenSteady} bytes steady, ` +
+    `+${ov.tokenWithKey} with the key. Text form costs about a third more.\n`,
+);
