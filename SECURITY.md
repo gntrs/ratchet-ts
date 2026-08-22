@@ -4,9 +4,9 @@
 
 `ratchet-ts` is a `0.x`, pre-stability library. It has **not** had an
 independent security audit and has **not** undergone formal verification. The
-cryptographic primitives it builds on (X25519, ML-KEM-768, HKDF-SHA256,
-HMAC-SHA256, XChaCha20-Poly1305) come from the audited
-[`@noble`](https://github.com/paulmillr) libraries. The way this library
+cryptographic primitives it builds on (X25519, ML-KEM-768, ML-DSA-65,
+HKDF-SHA256, HMAC-SHA512, ChaCha20-Poly1305, XChaCha20-Poly1305) come from the
+audited [`@noble`](https://github.com/paulmillr) libraries. The way this library
 composes those primitives into a handshake and a Double Ratchet is the part that
 has not been reviewed by anyone other than the author.
 
@@ -16,10 +16,26 @@ or fund an audit of this code.
 
 ## Known limitations
 
-- No test isolates the ML-KEM-768 contribution to the root key. If the
-  post-quantum leg were silently dropped, the current suite would still pass.
-  The classical X25519 leg is exercised on every handshake.
-- The wire format (`OCX1`) and the public API can change within `0.x`.
+- The hybrid claim is pinned by test, not by reading the source. Every leg of
+  both handshakes is proved load bearing by breaking it: `test/hybrid.test.ts`
+  pins the live invite/accept path, and `test/leg-isolation.test.ts` covers the
+  two X25519 legs, the conversation id binding, the four secret offline prekey
+  handshake, the order they are concatenated in, and the downgrade surface. The
+  method is the same throughout. Run the real handshake, take the root key the
+  live session actually holds, then re-derive it from outside: the
+  reconstruction with every leg present must match byte for byte, and every
+  reconstruction with a leg dropped, zeroed or substituted must miss.
+  Both files were checked by mutation on 2026-08-21, by editing
+  `src/handshake.ts` and `src/prekeys.ts` to drop the ML-KEM secret from the
+  ikm. Seven tests went red. Before that date this section said the opposite,
+  that nothing isolated the ML-KEM contribution, and it was already out of date
+  when it said it.
+- What this does NOT prove: that the composition is sound, that the ML-KEM
+  parameters are used correctly beyond what `@noble/post-quantum` guarantees,
+  or that there is no state machine bug elsewhere. It proves the post-quantum
+  arm cannot be removed or ignored without a test failing, which is a smaller
+  claim than being secure and is the only one made here.
+- The wire format (`OCX3`) and the public API can change within `0.x`.
 - This library does not defend against a compromised runtime (malicious or
   tampered JavaScript executing in the same context as the keys).
 
