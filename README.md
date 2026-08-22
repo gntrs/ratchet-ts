@@ -184,6 +184,23 @@ ratchet peers                           # who this machine has talked to
 ratchet relay                           # your own relay, no default host exists
 ```
 
+`ratchet chat` is a full screen client. Messages exist in the two terminals and
+nowhere else: nothing is written to disk, so there is no history to seize, leak
+or subpoena later.
+
+![the ratchet chat client, a verified session with messages and a file transfer](./docs/shots/tui-chat.svg)
+
+The six words in the header are the peer's fingerprint. You read them aloud once
+and the client remembers. **If the key ever changes, you get this instead**, and
+it is deliberately not a small yellow banner you can click past:
+
+![the changed key alarm, naming what was already sent under the new key](./docs/shots/tui-alarm.svg)
+
+It names what leaked rather than only what changed, because by the time you see
+this the interesting question is what you already sent. It also says plainly
+that a peer who reinstalled and a stranger in the middle produce exactly this
+screen, since the tool genuinely cannot tell you which one it is.
+
 Full walkthrough, including the `.env` case and what the CLI keeps on disk, is
 in [NOTEBOOK.md](./NOTEBOOK.md).
 
