@@ -1,0 +1,18 @@
+# Pinned exactly, on purpose.
+#
+# This file is not a dependency list, it is the record of WHICH second
+# implementation agreed with the first. "some version of a Python ML-KEM
+# library reproduced the vectors" is a much weaker statement than naming it, so
+# a float here would quietly erode the thing the verifier exists to prove.
+#
+# cryptography is OpenSSL underneath and supplies X25519, HKDF-SHA256,
+# HMAC-SHA512 and ChaCha20-Poly1305. kyber-py is a pure Python FIPS 203
+# implementation and supplies ML-KEM-768. Neither shares code with @noble.
+#
+# verify.py reaches for two kyber-py entry points that are private by naming
+# convention, _keygen_internal and _encaps_internal, because deterministic
+# keygen from a d||z seed and encapsulation with an explicit m are exactly what
+# a known-answer file needs and the public API deliberately does not expose. A
+# pin is what keeps that from breaking on somebody else's refactor.
+cryptography==50.0.0
+kyber-py==1.2.0

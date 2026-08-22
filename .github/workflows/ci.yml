@@ -15,8 +15,8 @@ jobs:
         node: [20.x, 22.x, 24.x]
     name: node ${{ matrix.node }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     name: bun
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       # npm ci and the tsup build run on the runner's preinstalled Node.
       # Only the smoke execution goes through Bun, because the artifact
@@ -51,10 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     name: deno
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Node is still needed here: npm ci creates the node_modules tree that
       # Deno resolves the @noble bare specifiers from, and tsup builds dist.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.x
           cache: npm
@@ -66,3 +66,41 @@ jobs:
       # --allow-read only: the script reads dist and node_modules, needs no
       # network, no env, and no write access. Least privilege is the point.
       - run: deno run --allow-read examples/runtime-smoke.mjs
+
+  # An independent implementation of the key schedule, in another language,
+  # sharing no code with the library it checks. test/vectors.test.ts proves the
+  # TypeScript still produces the vectors; that is the same author, the same
+  # language and the same primitive library on both sides of the comparison, so
+  # a misunderstanding of the protocol would be reproduced identically by both
+  # halves and agree perfectly. This job is what makes vectors.json a
+  # specification rather than a description of whatever the TypeScript does.
+  verify:
+    runs-on: ubuntu-latest
+    name: independent verifier
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No Node here at all, and that is the point: this job never builds the
+      # library, never imports it, and would still run if src/ were deleted.
+      - run: pip install -r verify/requirements.txt
+      - run: python verify/verify.py
+
+  # A third implementation, in Go, checked against the GO STANDARD LIBRARY's
+  # ML-KEM and HKDF. Agreeing with a national standard library is a stronger
+  # statement than agreeing with any one package, because nobody chose it to
+  # make this repository look good. Go exposes no deterministic encapsulation,
+  # so this job checks keygen and DECAPSULATION, the receiving side; verify.py
+  # covers the sending side. Neither pretends to cover the other's half.
+  verify-go:
+    runs-on: ubuntu-latest
+    name: independent verifier (go)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # No Node here either. This job would still run if src/ were deleted.
+      - run: go run .
+        working-directory: verify/go
