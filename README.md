@@ -63,8 +63,9 @@ npm audit signatures
 
 **Check the protocol against other implementations.** [SPEC.md](./SPEC.md)
 defines the wire format and key schedule completely enough to implement from
-scratch without reading `src/`. There are two programs that did exactly that.
-Neither imports anything from this repository, and both run in CI on every push.
+scratch without reading `src/`. Three programs did exactly that, in three
+languages, against three different sets of primitives. None imports anything
+from this repository, and all three run in CI on every push.
 
 `verify/verify.py` uses OpenSSL and a pure Python FIPS 203 library.
 
@@ -79,16 +80,26 @@ python3 -m venv .venv
 `verify/go` checks the same thing against the **Go standard library's** ML-KEM
 and HKDF. Agreeing with a national standard library is a stronger statement than
 agreeing with any one package, because nobody picked it to make this repo look
-good. Go exposes no deterministic encapsulation, so it checks key generation and
-decapsulation, the receiving side; the Python one covers the sending side.
-Between them both directions are covered, and neither pretends to cover the
-other's half.
+good. Go exposes no deterministic encapsulation, by design, so it verifies key
+generation and decapsulation, the receiving side.
 
 ```sh
 cd verify/go && go run .
 ```
 
 ![the go verifier agreeing, using the go standard library ml-kem](./docs/shots/verify-go.svg)
+
+`verify/rust` uses RustCrypto, and is the only one that covers **both
+directions** in one program: it re-encapsulates to reproduce the KEM ciphertext
+and then decapsulates that ciphertext back to the same shared secret. Rust is
+also the language libsignal is written in, which is the reference at the top of
+this README.
+
+```sh
+cd verify/rust && cargo run --release
+```
+
+![the rust verifier reproducing the kem ciphertext and decapsulating it back](./docs/shots/verify-rust.svg)
 
 **Check the primitives against the standards.** `test/kat-primitives.test.ts`
 runs the published vectors from RFC 7748, RFC 5869, RFC 4231 and RFC 8439
@@ -130,7 +141,7 @@ in CI on every push rather than promised here.
 | Overhead per message | 34 bytes, 67 when a ratchet key rides along |
 | Seal, 256 B payload, p50 | 16.36 us |
 | Handshake | 25.8 ms, two ML-DSA-65 signatures, once per conversation |
-| Independent verifiers | Python and Go, both in CI |
+| Independent verifiers | Python, Go and Rust, all in CI |
 | Published with provenance | Yes, from 0.6.1 |
 
 Measured on an AMD Ryzen 5 7530U, Node v25.8.0, native backends. Method, machine

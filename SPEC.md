@@ -560,8 +560,11 @@ Two things check it, and they are not the same check:
 | `test/vectors.test.ts` | re-derives every value in TypeScript and hands the tokens to the real ratchet. Catches accidental change. |
 | `verify/verify.py` | re-derives every value in Python, using OpenSSL and a pure Python FIPS 203 implementation. Covers the sending side, including deterministic encapsulation. |
 | `verify/go` | re-derives every value in Go, against the Go standard library's `crypto/mlkem` and `crypto/hkdf`. Covers the receiving side: Go exposes no deterministic encapsulation, so it checks key generation and decapsulation instead. |
+| `verify/rust` | re-derives every value in Rust using RustCrypto. The only one covering both directions of the KEM in one program, since the crate exposes deterministic key generation and deterministic encapsulation. |
 
-Neither verifier imports anything from this repository, and both run in CI.
+None of the three imports anything from this repository, and all three run in
+CI. If you write a fourth, in any language, `SPEC.md` should be enough and a
+pull request adding it is welcome.
 
 Run the second one:
 

@@ -41,6 +41,13 @@ author, in one language, against his own vectors.
   encapsulation by design, so it verifies key generation and decapsulation, the
   receiving side of the exchange, while `verify.py` covers the sending side.
   Between them both directions are covered and neither pretends otherwise.
+- **`verify/rust`, a fourth implementation.** RustCrypto, and the only verifier
+  that covers both directions of the KEM in one program: `ml-kem` exposes
+  deterministic key generation and deterministic encapsulation, so it
+  reproduces the ciphertext and then decapsulates that ciphertext back to the
+  same shared secret. 28 checks. Rust is also libsignal's language, which is
+  the reference this project keeps pointing readers at, so being
+  reimplementable there is worth demonstrating rather than assuming.
 - Screenshots in `docs/shots/`, generated from captured output by a script
   rather than photographed, so no path, hostname or address can end up in an
   image by accident. The capture used a sandboxed `RATCHET_HOME`, and those

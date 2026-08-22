@@ -12,3 +12,7 @@ deno.lock
 # Scratch directory used to install and exercise the packed tarball. It holds a
 # full node_modules tree and would otherwise be committed by a careless add.
 packsmoke/
+
+# Rust build output for the independent verifier. Large, generated, and
+# rebuilt from Cargo.lock, so it must never be tracked.
+verify/rust/target/

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="623" height="952" viewBox="0 0 623 952" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13.5">
+<rect width="623" height="952" rx="10" fill="#0d1117"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/><circle cx="44" cy="20" r="6" fill="#febc2e"/><circle cx="64" cy="20" r="6" fill="#28c840"/>
+<text x="311.5" y="25" fill="#6e7681" font-size="12" text-anchor="middle">verify/rust  ·  RustCrypto ML-KEM, both directions</text>
+<text x="22.0" y="75.0" fill="#c9d1d9" xml:space="preserve">identities,&#160;derived&#160;from&#160;the&#160;seeds&#160;alone</text>
+<text x="22.0" y="94.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;alice&#160;X25519&#160;public</text>
+<text x="22.0" y="113.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;bob&#160;X25519&#160;public</text>
+<text x="22.0" y="132.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;alice&#160;ML-KEM-768&#160;public</text>
+<text x="22.0" y="151.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;bob&#160;ML-KEM-768&#160;public</text>
+<text x="22.0" y="189.0" fill="#c9d1d9" xml:space="preserve">ratchet&#160;keys</text>
+<text x="22.0" y="208.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;bob&#160;ratchet&#160;1&#160;public</text>
+<text x="22.0" y="227.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;alice&#160;ratchet&#160;1&#160;public</text>
+<text x="22.0" y="246.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;bob&#160;ratchet&#160;2&#160;public</text>
+<text x="22.0" y="284.0" fill="#c9d1d9" xml:space="preserve">ML-KEM,&#160;both&#160;directions,&#160;which&#160;only&#160;this&#160;verifier&#160;can&#160;do</text>
+<text x="22.0" y="303.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;ML-KEM-768&#160;ciphertext,&#160;re-encapsulated</text>
+<text x="22.0" y="322.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;ML-KEM-768&#160;shared&#160;secret</text>
+<text x="22.0" y="341.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;decapsulation&#160;recovers&#160;the&#160;shared&#160;secret</text>
+<text x="22.0" y="379.0" fill="#c9d1d9" xml:space="preserve">handshake</text>
+<text x="22.0" y="398.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;dh1,&#160;binds&#160;the&#160;responder&#160;identity</text>
+<text x="22.0" y="417.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;dh2,&#160;binds&#160;the&#160;fresh&#160;ratchet&#160;key</text>
+<text x="22.0" y="436.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;handshake&#160;root&#160;key</text>
+<text x="22.0" y="474.0" fill="#c9d1d9" xml:space="preserve">initiator&#160;side,&#160;computed&#160;independently&#160;and&#160;required&#160;to&#160;agree</text>
+<text x="22.0" y="493.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;initiator&#160;recovers&#160;the&#160;same&#160;dh1</text>
+<text x="22.0" y="512.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;initiator&#160;recovers&#160;the&#160;same&#160;dh2</text>
+<text x="22.0" y="531.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;both&#160;sides&#160;reach&#160;the&#160;same&#160;handshake&#160;root</text>
+<text x="22.0" y="569.0" fill="#c9d1d9" xml:space="preserve">root&#160;ratchet</text>
+<text x="22.0" y="588.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;root&#160;after&#160;the&#160;initiator&#x27;s&#160;step</text>
+<text x="22.0" y="607.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;initiator&#160;to&#160;responder&#160;chain&#160;key</text>
+<text x="22.0" y="626.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;root&#160;after&#160;the&#160;responder&#x27;s&#160;step</text>
+<text x="22.0" y="645.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;responder&#160;to&#160;initiator&#160;chain&#160;key</text>
+<text x="22.0" y="683.0" fill="#c9d1d9" xml:space="preserve">symmetric&#160;chains,&#160;three&#160;steps&#160;each&#160;direction</text>
+<text x="22.0" y="702.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;0,&#160;initiator&#160;to&#160;responder</text>
+<text x="22.0" y="721.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;1,&#160;initiator&#160;to&#160;responder</text>
+<text x="22.0" y="740.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;2,&#160;initiator&#160;to&#160;responder</text>
+<text x="22.0" y="759.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;0,&#160;responder&#160;to&#160;initiator</text>
+<text x="22.0" y="778.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;1,&#160;responder&#160;to&#160;initiator</text>
+<text x="22.0" y="797.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;key&#160;2,&#160;responder&#160;to&#160;initiator</text>
+<text x="22.0" y="835.0" fill="#c9d1d9" xml:space="preserve">the&#160;wire,&#160;opened&#160;from&#160;scratch</text>
+<text x="22.0" y="854.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;message&#160;0&#160;opens&#160;to&#160;the&#160;known&#160;plaintext</text>
+<text x="22.0" y="873.0" fill="#c9d1d9" xml:space="preserve">&#160;&#160;ok&#160;&#160;&#160;reply&#160;0&#160;opens&#160;to&#160;the&#160;known&#160;plaintext</text>
+<text x="22.0" y="911.0" fill="#c9d1d9" xml:space="preserve">all&#160;28&#160;checks&#160;passed.&#160;RustCrypto&#160;ML-KEM&#160;both&#160;directions,&#160;no&#160;shared&#160;code.</text>
+</svg>

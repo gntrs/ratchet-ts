@@ -104,3 +104,23 @@ jobs:
       # No Node here either. This job would still run if src/ were deleted.
       - run: go run .
         working-directory: verify/go
+
+  # A fourth implementation, in Rust, and the only one that covers BOTH
+  # directions of the KEM in one program: the RustCrypto ml-kem crate exposes
+  # generate_deterministic and encapsulate_deterministic, so this job
+  # reproduces the ciphertext AND recovers the shared secret from it. Rust is
+  # also the language libsignal is written in, which is the reference this
+  # library keeps pointing readers at.
+  verify-rust:
+    runs-on: ubuntu-latest
+    name: independent verifier (rust)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: verify/rust
+      # Locked, so the versions that agreed are the versions that run. A
+      # verifier whose dependencies float is not recording what agreed.
+      - run: cargo run --release --locked
+        working-directory: verify/rust
